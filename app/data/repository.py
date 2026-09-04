@@ -15,20 +15,39 @@ from datetime import datetime
 
 import streamlit as st
 
-from app.data.excel_loader import LoadResult, fingerprint, load_dataset
-from app.settings import DataSettings, Settings
+from app.data import postgres_loader
+from app.data.excel_loader import LoadResult, fingerprint
+from app.data.excel_loader import load_dataset as load_excel
+from app.settings import POSTGRES, DataSettings, Settings
 
 _REFRESH_TOKEN = "data_refresh_token"
 
 
 @st.cache_data(show_spinner=False, ttl=None, max_entries=4)
 def _cached_load(_settings: DataSettings, signature: str, token: int) -> LoadResult:
-    """Cached by ``signature`` (file state) and ``token`` (manual refresh).
+    """Cached by ``signature`` (source state) and ``token`` (manual refresh).
 
     ``_settings`` is prefixed with an underscore so Streamlit does not try to
-    hash the dataclass; ``signature`` already changes whenever the files do.
+    hash the dataclass; ``signature`` already changes whenever the source does.
     """
-    return load_dataset(_settings)
+    if _settings.source_type == POSTGRES:
+        return postgres_loader.load_dataset(_settings)
+    return load_excel(_settings)
+
+
+def source_signature(settings: DataSettings) -> str:
+    """A cheap signature of the data behind the dashboard.
+
+    For workbooks this is their modification state, so a replaced file
+    invalidates the cache by itself. A database has no equivalent an app can
+    read cheaply -- a row could change at any moment without anything on disk
+    moving -- so the connection identity is the key and Refresh is what forces a
+    re-read. That is the honest trade: the button means something here.
+    """
+    if settings.source_type == POSTGRES:
+        pg = settings.postgres
+        return f"postgres:{pg.describe()}/{pg.qualified_table()}?{pg.where}"
+    return fingerprint(settings.sources)
 
 
 def clear_cache() -> None:
@@ -52,12 +71,36 @@ def request_refresh() -> None:
 
 
 def get_dataset(settings: Settings) -> LoadResult:
-    """The dataset in force right now."""
-    signature = fingerprint(settings.data.sources)
-    return _cached_load(settings.data, signature, current_token())
+    """The dataset in force right now, from whichever source is configured."""
+    return _cached_load(
+        settings.data, source_signature(settings.data), current_token()
+    )
 
 
 def last_refresh_display(result: LoadResult, tz) -> str:
     """Human-readable timestamp of the load that produced ``result``."""
     stamp: datetime = result.loaded_at.astimezone(tz)
     return stamp.strftime("%b %d, %Y at %I:%M:%S %p %Z").replace(" 0", " ")
+
+
+def source_description(settings: Settings, result: LoadResult) -> str:
+    """Where the rows on screen came from, phrased for the source in use."""
+    if settings.data.source_type == POSTGRES:
+        return settings.data.postgres.qualified_table()
+    return f"{result.file_count} workbook(s)"
+
+
+def refresh_label(settings: Settings) -> str:
+    if settings.data.source_type == POSTGRES:
+        return "Re-read the database"
+    return "Re-read all workbooks"
+
+
+def refresh_help(settings: Settings) -> str:
+    if settings.data.source_type == POSTGRES:
+        return (
+            "Re-query the reporting database. Rows can change at any moment "
+            "without anything on disk moving, so this button is how the "
+            "dashboard picks up a load that has since run."
+        )
+    return "Re-read every configured Excel workbook from disk."

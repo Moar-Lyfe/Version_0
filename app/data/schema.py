@@ -12,6 +12,8 @@ from datetime import date
 
 import pandas as pd
 
+from app.settings import DataSettings
+
 DATE = "date"
 AGENT = "agent"
 CATEGORY = "category"
@@ -127,3 +129,53 @@ def slice_dates(frame: pd.DataFrame, start: date, end: date) -> pd.DataFrame:
     days = frame[DATE].dt.normalize()
     mask = (days >= pd.Timestamp(start)) & (days <= pd.Timestamp(end))
     return frame.loc[mask]
+
+
+# --------------------------------------------------------------------------- #
+# Derived fields
+# --------------------------------------------------------------------------- #
+#
+# Category bucketing and web-sale detection are *interpretation*, not fact, so
+# they are applied when the data is read rather than baked into storage. Change
+# which products count as Category 1 in config.yaml and every figure moves --
+# no reload, no migration. Both the Excel and the database readers call these,
+# so the two can never disagree about what a row means.
+
+
+def category_lookup(settings: DataSettings) -> dict[str, str]:
+    """Normalised category value -> ``category_1`` / ``category_2``."""
+    lookup: dict[str, str] = {}
+    for spec in (settings.category_1, settings.category_2):
+        for value in spec.values:
+            lookup[normalise_key(value)] = spec.key
+    return lookup
+
+
+def web_lookups(settings: DataSettings) -> tuple[set[str], set[str]]:
+    return (
+        {normalise_key(v) for v in settings.web_channel_values},
+        {normalise_key(v) for v in settings.web_agent_values},
+    )
+
+
+def derive(frame: pd.DataFrame, settings: DataSettings) -> pd.DataFrame:
+    """Add :data:`CATEGORY_KEY` and :data:`IS_WEB` from the raw columns.
+
+    ``frame`` must already carry CATEGORY, CHANNEL and AGENT. Returned with the
+    canonical columns in canonical order.
+    """
+    if frame.empty:
+        return empty_frame()
+
+    lookup = category_lookup(settings)
+    web_channels, web_agents = web_lookups(settings)
+
+    out = frame.copy()
+    out[CATEGORY_KEY] = [
+        lookup.get(normalise_key(value), CATEGORY_OTHER) for value in out[CATEGORY]
+    ]
+    out[IS_WEB] = [
+        normalise_key(channel) in web_channels or normalise_key(agent) in web_agents
+        for channel, agent in zip(out[CHANNEL], out[AGENT])
+    ]
+    return out[list(CANONICAL_COLUMNS)]

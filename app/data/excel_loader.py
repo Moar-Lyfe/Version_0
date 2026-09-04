@@ -166,21 +166,10 @@ def resolve_columns(
 # --------------------------------------------------------------------------- #
 
 
-def _category_lookup(settings: DataSettings) -> dict[str, str]:
-    lookup: dict[str, str] = {}
-    for spec in (settings.category_1, settings.category_2):
-        for value in spec.values:
-            lookup[S.normalise_key(value)] = spec.key
-    return lookup
-
-
 def _normalise_sheet(
     raw: pd.DataFrame,
     settings: DataSettings,
     report: FileReport,
-    category_lookup: dict[str, str],
-    web_channels: set[str],
-    web_agents: set[str],
     header_row: int = 0,
 ) -> pd.DataFrame:
     columns = resolve_columns(list(raw.columns), settings.columns)
@@ -237,15 +226,6 @@ def _normalise_sheet(
         else ""
     )
 
-    out[S.CATEGORY_KEY] = [
-        category_lookup.get(S.normalise_key(value), S.CATEGORY_OTHER)
-        for value in out[S.CATEGORY]
-    ]
-    out[S.IS_WEB] = [
-        S.normalise_key(channel) in web_channels or S.normalise_key(agent) in web_agents
-        for channel, agent in zip(out[S.CHANNEL], out[S.AGENT])
-    ]
-
     out[S.SOURCE_FILE] = report.path
     out[S.SOURCE_SHEET] = report.sheet
     # The frame index is the zero-based offset below the header row, so
@@ -258,7 +238,8 @@ def _normalise_sheet(
     out = out.loc[out[S.DATE].notna()]
     report.rows_kept = int(len(out))
 
-    return out[list(S.CANONICAL_COLUMNS)]
+    # Category bucketing and web detection are shared with the database reader.
+    return S.derive(out, settings)
 
 
 def _read_sheets(path: Path, source: SourceSettings) -> dict[str, pd.DataFrame]:
@@ -311,9 +292,6 @@ def _read_sheets(path: Path, source: SourceSettings) -> dict[str, pd.DataFrame]:
 def load_dataset(settings: DataSettings) -> LoadResult:
     """Read every configured workbook and return one canonical dataset."""
     loaded_at = datetime.now().astimezone()
-    category_lookup = _category_lookup(settings)
-    web_channels = {S.normalise_key(v) for v in settings.web_channel_values}
-    web_agents = {S.normalise_key(v) for v in settings.web_agent_values}
 
     reports: list[FileReport] = []
     warnings: list[str] = []
@@ -356,13 +334,7 @@ def load_dataset(settings: DataSettings) -> LoadResult:
                     continue
                 raw = raw.dropna(how="all")
                 frame = _normalise_sheet(
-                    raw,
-                    settings,
-                    report,
-                    category_lookup,
-                    web_channels,
-                    web_agents,
-                    header_row=source.header_row,
+                    raw, settings, report, header_row=source.header_row
                 )
                 reports.append(report)
                 if not frame.empty:

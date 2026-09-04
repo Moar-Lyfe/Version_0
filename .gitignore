@@ -12,6 +12,8 @@ env/
 # Local configuration & runtime state (machine specific)
 config/config.yaml
 config/config.local.yaml
+# runtime/ holds the run logs, saved pipeline, snapshots and the ETL's
+# staging CSVs -- the last of those contain real rows.
 runtime/
 .streamlit/secrets.toml
 

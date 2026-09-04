@@ -18,10 +18,10 @@ import streamlit as st
 from app.core import snapshots
 from app.core.calendar_rules import WorkingCalendar
 from app.core.periods import build_periods
-from app.data import repository
+from app.data import database, postgres_loader, repository
 from app.data import schema as S
 from app.data.excel_loader import discover_files
-from app.settings import Settings
+from app.settings import POSTGRES, Settings
 from app.ui import components
 from app.views import widgets
 
@@ -42,12 +42,94 @@ def _configuration(settings: Settings) -> None:
 
     components.meta_strip(
         [
+            f"Reading from {settings.data.source_type}",
             f"Python {sys.version.split()[0]}",
             f"Streamlit {st.__version__}",
             f"pandas {pd.__version__}",
             f"Timezone {settings.app.timezone}",
         ]
     )
+
+
+def _database(settings: Settings, result) -> None:
+    """Connection, table, mapping and load history for the reporting database."""
+    pg = settings.data.postgres
+    components.section("Reporting database", pg.qualified_table())
+
+    probe = database.check(pg)
+    if probe.ok:
+        st.success(probe.message)
+    else:
+        st.error(probe.message)
+
+    pills = [pg.describe(), f"Table {pg.qualified_table()}"]
+    if probe.server_version:
+        pills.append(probe.server_version)
+    pills.append(
+        f"Password from {pg.password_env}"
+        if pg.password_env
+        else "Password from libpq (~/.pgpass or PGPASSWORD)"
+    )
+    if pg.where:
+        pills.append(f"Filter: {pg.where}")
+    components.meta_strip(pills)
+
+    if not probe.ok:
+        return
+
+    report = result.files[0] if result.files else None
+    if report and report.error:
+        st.error(report.error)
+
+    if report and report.matched_columns:
+        rows = [
+            {
+                "Canonical field": canonical,
+                "Table column": report.matched_columns.get(canonical) or "— not mapped —",
+                "Status": "mapped" if canonical in report.matched_columns else "default",
+            }
+            for canonical in postgres_loader.SELECTED
+        ]
+        widgets.dataframe(pd.DataFrame(rows), hide_index=True)
+        if report.missing_columns:
+            st.caption(
+                "Unmapped fields fall back to defaults (premium 0, one sale per "
+                "row, agent 'Unassigned'). Map them under `data.postgres.columns` "
+                "in config.yaml."
+            )
+
+    if report and report.headers:
+        with st.expander("Columns present in the table", expanded=False):
+            st.code("\n".join(report.headers), language="text")
+
+    runs = postgres_loader.latest_etl_runs(pg, limit=10)
+    with st.expander(f"Recent ETL loads ({len(runs)})", expanded=bool(runs)):
+        if not runs:
+            st.caption(
+                "No load history. `tools/etl_excel_to_postgres.py` records each "
+                "run in the `etl_runs` table; apply `db/schema.sql` if it is "
+                "missing."
+            )
+        else:
+            widgets.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "Started": r["started_at"].strftime("%Y-%m-%d %H:%M"),
+                            "Workbook": r["source_file"] or "—",
+                            "Sheet": r["source_sheet"] or "—",
+                            "Read": r["rows_read"],
+                            "Inserted": r["rows_inserted"],
+                            "Updated": r["rows_updated"],
+                            "Unchanged": r["rows_skipped"],
+                            "Status": r["status"],
+                            "Message": (r["message"] or "")[:120],
+                        }
+                        for r in runs
+                    ]
+                ),
+                hide_index=True,
+            )
 
 
 def _sources(settings: Settings) -> None:
@@ -304,20 +386,24 @@ def render(settings: Settings) -> None:
 
     result = repository.get_dataset(settings)
 
-    if st.button("Re-read all workbooks", type="primary"):
+    if st.button(repository.refresh_label(settings), type="primary"):
         repository.request_refresh()
         st.rerun()
     components.meta_strip(
         [
             f"Last read {repository.last_refresh_display(result, settings.app.tzinfo())}",
-            f"{result.file_count} workbook(s)",
+            f"{result.row_count:,} rows from "
+            f"{repository.source_description(settings, result)}",
         ]
     )
 
     _configuration(settings)
-    _sources(settings)
-    _files(result)
-    _column_mapping(settings, result)
+    if settings.data.source_type == POSTGRES:
+        _database(settings, result)
+    else:
+        _sources(settings)
+        _files(result)
+        _column_mapping(settings, result)
     _categories(settings, result)
     _web_sales(settings, result)
     _calendar(settings)

@@ -55,7 +55,7 @@ def _controls(settings: Settings, result) -> bool:
         if st.button(
             "Refresh data",
             type="primary",
-            help="Re-read every configured Excel workbook from disk.",
+            help=repository.refresh_help(settings),
         ):
             repository.request_refresh()
             st.rerun()
@@ -74,7 +74,9 @@ def _controls(settings: Settings, result) -> bool:
 
     tz = settings.app.tzinfo()
     pills = [f"Last refreshed {repository.last_refresh_display(result, tz)}"]
-    pills.append(f"{result.row_count:,} rows from {result.file_count} workbook(s)")
+    pills.append(
+        f"{result.row_count:,} rows from {repository.source_description(settings, result)}"
+    )
     if not include_web:
         pills.append("Web sales excluded")
     components.meta_strip(pills)

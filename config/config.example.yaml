@@ -34,6 +34,61 @@ app:
 # monthly exports works exactly like a single master file.
 # -----------------------------------------------------------------------------
 data:
+  # ---------------------------------------------------------------------------
+  # WHERE REPORTING READS FROM
+  # ---------------------------------------------------------------------------
+  #   excel     -- read the workbooks directly (the original setup)
+  #   postgres  -- read the reporting database
+  #
+  # Excel remains the operational front end either way. With `postgres`, the
+  # workbooks are moved in by `tools/etl_excel_to_postgres.py` and the dashboard
+  # reads the result, which is what makes reporting independent of whether a
+  # file happens to be open, moved, or mid-save.
+  #
+  # Switching this is the whole migration -- every KPI, projection, moving
+  # average and alert is unaware of where its rows came from.
+  # ---------------------------------------------------------------------------
+  source_type: "excel"
+
+  # ---------------------------------------------------------------------------
+  # THE REPORTING DATABASE  (used when source_type is "postgres")
+  # ---------------------------------------------------------------------------
+  # Create it with db/schema.sql. The PASSWORD IS NEVER STORED HERE: it comes
+  # from the environment variable named below, or -- when that is null -- from
+  # libpq's own mechanisms (~/.pgpass, PGPASSWORD).
+  # ---------------------------------------------------------------------------
+  postgres:
+    host: "localhost"
+    port: 5432
+    database: "reporting"
+    user: "dashboard"
+    password_env: "EXEC_DASH_DB_PASSWORD"
+    schema: "public"
+    table: "sales"
+    # sslmode: "require"        # for a database not on this machine
+    connect_timeout: 10
+
+    # Canonical field -> column in your table. Omit the block entirely to use
+    # the shipped schema's names. Only `date` is required; anything unmapped
+    # falls back to the same defaults the workbook reader uses, and Diagnostics
+    # shows exactly what resolved.
+    columns:
+      date: "sale_date"
+      premium: "premium"
+      agent: "agent"
+      category: "category"
+      channel: "channel"
+      policy_id: "policy_id"
+      count: "units"
+
+    # Optional SQL predicate, without the WHERE keyword. For excluding voided
+    # or pending rows that should never reach reporting.
+    where: ""
+
+  # ---------------------------------------------------------------------------
+  # THE WORKBOOKS  (the ETL's input, and the reporting source when
+  # source_type is "excel")
+  # ---------------------------------------------------------------------------
   sources:
     - name: "sample"
       path: "data/sample"

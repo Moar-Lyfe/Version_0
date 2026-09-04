@@ -24,7 +24,7 @@ from app.core.analytics import DATA, Alert, Severity
 from app.core.calendar_rules import WorkingCalendar
 from app.data import schema as S
 from app.data.excel_loader import LoadResult, discover_files
-from app.settings import DataHealthSettings, DataSettings
+from app.settings import POSTGRES, DataHealthSettings, DataSettings
 
 FRESHNESS = "freshness"
 VOLUME = "volume"
@@ -227,8 +227,31 @@ def check_volume(
 
 
 def check_sources(result: LoadResult, data_settings: DataSettings) -> Alert:
-    """Unreadable workbooks and sources that matched nothing."""
+    """Unreadable workbooks, sources that matched nothing, or a dead database."""
     failed = [report for report in result.files if report.error]
+
+    if data_settings.source_type == POSTGRES:
+        # There is one source and it either answered or it did not; a failure
+        # here means the dashboard has no data at all, not merely less of it.
+        if failed:
+            return _alert(
+                "Sources",
+                SOURCES,
+                Severity.CRITICAL,
+                f"The reporting database could not be read: {failed[0].error}",
+                current=1.0,
+                reference_label="problems",
+            )
+        return _alert(
+            "Sources",
+            SOURCES,
+            Severity.OK,
+            f"Read {result.row_count:,} row(s) from "
+            f"{data_settings.postgres.qualified_table()}.",
+            current=0.0,
+            reference_label="problems",
+        )
+
     empty_sources = [
         source.name for source in data_settings.sources if not discover_files(source)
     ]

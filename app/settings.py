@@ -66,13 +66,92 @@ class CategorySettings:
 
 
 @dataclass(frozen=True)
+class PostgresSettings:
+    """Connection and mapping for the reporting database.
+
+    The password is never held in this file. It comes from the environment
+    variable named by ``password_env`` (or from libpq's own mechanisms -- a
+    ``~/.pgpass`` file or ``PGPASSWORD`` -- when that is left unset), so
+    ``config.yaml`` stays safe to read over someone's shoulder.
+    """
+
+    host: str = "localhost"
+    port: int = 5432
+    database: str = "reporting"
+    user: str = "dashboard"
+    password_env: str | None = "EXEC_DASH_DB_PASSWORD"
+    db_schema: str = "public"
+    table: str = "sales"
+    sslmode: str | None = None
+    connect_timeout: int = 10
+    # Canonical field -> column name in the table.
+    columns: dict[str, str] = field(default_factory=dict)
+    # Extra SQL predicate, without the WHERE. For excluding voided rows, say.
+    where: str = ""
+
+    DEFAULT_COLUMNS = {
+        "date": "sale_date",
+        "premium": "premium",
+        "agent": "agent",
+        "category": "category",
+        "channel": "channel",
+        "policy_id": "policy_id",
+        "count": "units",
+    }
+
+    def column(self, canonical: str) -> str | None:
+        """Column backing ``canonical``, or ``None`` when it is not stored."""
+        if canonical in self.columns:
+            value = str(self.columns[canonical]).strip()
+            return value or None
+        return self.DEFAULT_COLUMNS.get(canonical)
+
+    def qualified_table(self) -> str:
+        return f"{self.db_schema}.{self.table}"
+
+    def password(self) -> str | None:
+        if not self.password_env:
+            return None
+        return os.environ.get(self.password_env) or None
+
+    def connection_kwargs(self) -> dict[str, Any]:
+        """Arguments for ``psycopg.connect``. Password omitted when unset."""
+        kwargs: dict[str, Any] = {
+            "host": self.host,
+            "port": self.port,
+            "dbname": self.database,
+            "user": self.user,
+            "connect_timeout": self.connect_timeout,
+        }
+        password = self.password()
+        if password:
+            kwargs["password"] = password
+        if self.sslmode:
+            kwargs["sslmode"] = self.sslmode
+        return kwargs
+
+    def describe(self) -> str:
+        """Human-readable target, never including the password."""
+        return f"postgresql://{self.user}@{self.host}:{self.port}/{self.database}"
+
+
+@dataclass(frozen=True)
 class DedupeSettings:
     enabled: bool = False
     keys: tuple[str, ...] = ("policy_id", "date")
 
 
+EXCEL = "excel"
+POSTGRES = "postgres"
+VALID_SOURCE_TYPES = (EXCEL, POSTGRES)
+
+
 @dataclass(frozen=True)
 class DataSettings:
+    # Where reporting reads from. Excel remains the operational front end; the
+    # ETL moves it into Postgres, and the dashboard reads whichever is named.
+    source_type: str = EXCEL
+    postgres: PostgresSettings = field(default_factory=PostgresSettings)
     sources: tuple[SourceSettings, ...] = ()
     columns: dict[str, tuple[str, ...]] = field(default_factory=dict)
     category_1: CategorySettings = field(
@@ -454,6 +533,27 @@ TARGET_PERIODS = ("month", "year")
 _MONTH_KEY = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 
 
+def _parse_postgres(raw: dict[str, Any]) -> PostgresSettings:
+    defaults = PostgresSettings()
+    columns = {
+        str(k): str(v) for k, v in (raw.get("columns") or {}).items() if str(v).strip()
+    }
+    password_env = raw.get("password_env", defaults.password_env)
+    return PostgresSettings(
+        host=str(raw.get("host") or defaults.host),
+        port=_as_int(raw.get("port"), defaults.port),
+        database=str(raw.get("database") or defaults.database),
+        user=str(raw.get("user") or defaults.user),
+        password_env=(str(password_env) if password_env else None),
+        db_schema=str(raw.get("schema") or defaults.db_schema),
+        table=str(raw.get("table") or defaults.table),
+        sslmode=(str(raw["sslmode"]) if raw.get("sslmode") else None),
+        connect_timeout=_as_int(raw.get("connect_timeout"), defaults.connect_timeout),
+        columns=columns,
+        where=str(raw.get("where") or ""),
+    )
+
+
 def _parse_snapshots(raw: dict[str, Any]) -> SnapshotSettings:
     defaults = SnapshotSettings()
     return SnapshotSettings(
@@ -540,6 +640,16 @@ def _parse(raw: dict[str, Any], source_file: Path) -> Settings:
 
     data_raw = raw.get("data") or {}
 
+    source_type = str(data_raw.get("source_type") or EXCEL).strip().lower()
+    if source_type not in VALID_SOURCE_TYPES:
+        warnings.append(
+            f"data.source_type {source_type!r} is not one of "
+            f"{', '.join(VALID_SOURCE_TYPES)}; using {EXCEL}."
+        )
+        source_type = EXCEL
+
+    postgres = _parse_postgres(data_raw.get("postgres") or {})
+
     sources: list[SourceSettings] = []
     for index, item in enumerate(data_raw.get("sources") or []):
         if not isinstance(item, dict) or not item.get("path"):
@@ -555,22 +665,25 @@ def _parse(raw: dict[str, Any], source_file: Path) -> Settings:
                 recursive=bool(item.get("recursive", False)),
             )
         )
-    if not sources:
+    if not sources and source_type == EXCEL:
         warnings.append("No data sources configured -- the dashboard will be empty.")
 
     columns = {
         canonical: _as_str_tuple(aliases)
         for canonical, aliases in (data_raw.get("columns") or {}).items()
     }
-    for required in ("date", "premium"):
-        if not columns.get(required):
-            warnings.append(f"data.columns.{required} has no aliases configured.")
+    if source_type == EXCEL:
+        for required in ("date", "premium"):
+            if not columns.get(required):
+                warnings.append(f"data.columns.{required} has no aliases configured.")
 
     categories_raw = data_raw.get("categories") or {}
     web_raw = data_raw.get("web_sales") or {}
     dedupe_raw = data_raw.get("dedupe") or {}
 
     data = DataSettings(
+        source_type=source_type,
+        postgres=postgres,
         sources=tuple(sources),
         columns=columns,
         category_1=_parse_category(

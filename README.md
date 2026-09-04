@@ -1,9 +1,14 @@
 # Executive Dashboard
 
 An internal reporting dashboard for premium and sales production, built on
-Streamlit. It reads Excel workbooks straight off disk or a network share, shows
-four KPIs across five reporting windows, projects the month and the year off a
-working-day calendar, and breaks any period out by agent.
+Streamlit. It shows four KPIs across five reporting windows, projects the month
+and the year off a working-day calendar, and breaks any period out by agent.
+
+Excel is the operational front end. An ETL moves each export into a locally
+hosted PostgreSQL database, and the dashboard reads from there — so reporting no
+longer depends on whether a workbook happens to be open, moved, or mid-save. It
+can still read the workbooks directly during the migration: `data.source_type`
+picks, and nothing downstream knows the difference.
 
 An **Analytics** page tracks every KPI on 15/30/45/90-day moving averages and
 raises an alert when one slips — against a number you set, or against the
@@ -56,12 +61,104 @@ streamlit run app/main.py
 ```
 </details>
 
-**Requirements:** Python 3.10 or newer. Nothing else — no database, no server,
-no Excel installation.
+**Requirements:** Python 3.10 or newer, and PostgreSQL if you are using the
+database source. No Excel installation is needed at any point.
 
 > Start it from the project root (both launchers `cd` there first). Streamlit
 > only reads `.streamlit/config.toml` relative to the working directory, so
 > launching from elsewhere loses the theme and port settings.
+
+---
+
+## The pipeline
+
+```
+   Excel  ──►  tools/etl_excel_to_postgres.py  ──►  CSV  ──►  PostgreSQL  ──►  Dashboard
+ (front end)         read · normalise            (archive)     sales table
+```
+
+### One-time database setup
+
+```bash
+createdb reporting
+psql -d reporting -f db/schema.sql
+```
+
+Then in `config/config.yaml`:
+
+```yaml
+data:
+  source_type: "postgres"
+  postgres:
+    host: "localhost"
+    database: "reporting"
+    user: "dashboard"
+    password_env: "EXEC_DASH_DB_PASSWORD"   # never the password itself
+    table: "sales"
+```
+
+See [`db/README.md`](db/README.md) for roles, least privilege, and mapping an
+existing `sales` table whose columns are named differently.
+
+### Loading an export
+
+```bash
+python tools/etl_excel_to_postgres.py                         # newest matched workbook
+python tools/etl_excel_to_postgres.py --file sept.xlsx --sheet Production
+python tools/etl_excel_to_postgres.py --dry-run               # read and stage only
+python tools/etl_excel_to_postgres.py --csv-only              # stop at the CSV
+```
+
+Three visible stages, so a failure is always attributable to one of them:
+
+1. **Read** — the workbook and the named sheet, using exactly the same column
+   mapping and cell parsing the dashboard applies. Currency text, accounting
+   negatives and blank agents are handled identically at both ends.
+2. **Stage** — a CSV is archived under `runtime/etl/`. That file is the record
+   of what was handed to the database, and reloading it later needs no Excel.
+3. **Load** — `COPY` into a temporary table, then merge into `sales`.
+
+### Running it twice is safe
+
+The merge is keyed on a **natural key** built from each source row — the policy
+number when the export has one. That makes the load idempotent:
+
+| Situation | What happens |
+|---|---|
+| Same workbook loaded again | Nothing. Rows are present and identical |
+| New rows appended in Excel | Only those rows insert |
+| A premium corrected in Excel | That row **updates**; no duplicate, no double count |
+| A row deleted from Excel | Stays in the database — deletion is deliberate, not incidental |
+
+`--on-conflict ignore` switches to insert-only if you would rather corrections
+never flow through. The default is `update`, because a corrected row arriving as
+a second sale is the worse failure.
+
+Without a policy-number column, rows are keyed by a content hash, which means an
+edited row loads as a new one. The ETL says so when it happens — map
+`data.columns.policy_id` to avoid it.
+
+### Scheduling
+
+```cron
+0 5 * * 1-6  cd /opt/executive-dashboard && .venv/bin/python tools/etl_excel_to_postgres.py >> runtime/logs/etl.log 2>&1
+0 6 * * 1-6  cd /opt/executive-dashboard && .venv/bin/python tools/snapshot_kpis.py       >> runtime/logs/snapshots.log 2>&1
+0 7 * * 1-6  cd /opt/executive-dashboard && .venv/bin/python tools/check_alerts.py --quiet >> runtime/logs/alerts.log 2>&1
+```
+
+Order matters: load, then snapshot what was loaded, then judge it. Exit codes
+are 0 loaded, 1 read failure (nothing loaded), 2 database failure (nothing
+committed).
+
+`scripts/03_load_excel_to_database.py` does the same thing from the **Admin**
+panel, with a confirmation prompt before it writes — for when the load should be
+driven by whoever is at the dashboard.
+
+### Load history
+
+Every run appends to an `etl_runs` table: what ran, when, and what it changed.
+Diagnostics shows the last ten, which is what answers "why did last night's
+numbers move?" without depending on anyone's memory.
 
 ---
 
@@ -521,9 +618,12 @@ app/
     targets.py         goals, attainment and required pace
     snapshots.py       the archive of what was reported
   data/
-    schema.py          the canonical table every workbook becomes
-    excel_loader.py    discovery, column mapping, normalisation
-    repository.py      caching and the refresh button
+    schema.py          the canonical table every source becomes
+    excel_loader.py    workbook discovery, column mapping, normalisation
+    postgres_loader.py the same canonical table, read from the database
+    database.py        connections, and errors phrased for a human
+    etl.py             Excel -> CSV -> Postgres, as a library
+    repository.py      source dispatch, caching and the refresh button
   ui/
     theme.py           the stylesheet and number formatting
     components.py      KPI cards, sections, console
@@ -538,10 +638,11 @@ app/
     runner.py          subprocess execution with interactive stdin
     lock.py            single-holder run lock, with stale detection
 config/                config.example.yaml (committed) + config.yaml (yours)
+db/                    schema.sql and database setup notes
 deploy/                systemd unit for running it as a service
 docs/                  deployment.md -- LAN setup, firewall, autostart
 scripts/               example pipeline scripts
-tools/                 sample data, pipeline runner, alert checker, snapshots
+tools/                 ETL, sample data, pipeline runner, alerts, snapshots
 tests/                 pytest suite
 runtime/               saved run order and run logs (git-ignored)
 ```
@@ -568,6 +669,8 @@ Common fixes:
 | Symptom | Cause |
 |---|---|
 | Everything is zero | `data.sources.path` does not resolve, or `header_row` is wrong |
+| Zero rows on the database source | The ETL has not run, or `where` is filtering everything out |
+| A load says 0 inserted | Already loaded — the key matched. That is the design |
 | Premium is zero but sales are right | The premium column alias is missing |
 | Category 1 and 2 are both zero | The workbook's category values are not in `values` |
 | Rows are missing | Their date cell is text Excel never parsed — see "Skipped (bad date)" |
