@@ -285,6 +285,36 @@ Leave `rules: []` and a preset runs instead — no targets, no setup:
 - **Rules** — exactly what is doing the judging, and whether it came from your
   config or a preset.
 
+### Data health — is the feed even working?
+
+A broken export and a bad sales week look identical in a moving average. If the
+nightly job dies, recent days become zeros, the 15-day average collapses, and
+the page reports a confident 40% premium slide — sending someone after a sales
+problem that is really a dead scheduled job, while the real numbers sit unread
+in a file.
+
+Three checks separate the two, and they sort *above* the performance rules:
+
+| Check | Catches |
+|---|---|
+| **Freshness** | Working days between the newest row and today. Counted in working days, so a Sunday or a holiday weekend never reads as a failure |
+| **Row volume** | Recent rows per working day vs. a 90-day baseline — the partial export that arrives on time but carries a fraction of the rows |
+| **Sources** | A workbook that could not be read, or a configured source matching no files at all |
+
+When a data check goes critical, the Dashboard banner says *"Data problem —
+figures below may be wrong"* instead of a performance alert, and the Analytics
+page puts a caveat above the moving-average alerts. Fix the data first, then
+judge the numbers.
+
+```yaml
+analytics:
+  data_health:
+    stale_warn_days: 2
+    stale_critical_days: 4
+    volume_warn_pct: 30
+    volume_critical_pct: 50
+```
+
 ### "Not enough data" is a real answer
 
 A 90-day baseline needs 90 days. Rather than average over whatever exists and
@@ -336,6 +366,15 @@ admin:
 box, a `Pause before` box and free-form `Arguments` per step. Renumber, save,
 and it persists in `runtime/pipeline.json`. Steps run lowest-number first and
 the pipeline stops on the first non-zero exit.
+
+**Only one run at a time.** The runner lives in per-browser state, so without a
+guard two people with the panel open — or one person in a browser and a
+scheduled job in a terminal — could run the same scripts over the top of each
+other. An on-disk lock covers both: the second caller is told who holds it and
+since when. A lock left behind by a machine that lost power is detected as stale
+(the owning process is gone, or it has outlived the script timeout) and can be
+cleared from the panel. `tools/run_pipeline.py` takes the same lock, and
+`--force` overrides it when you are certain the holder is dead.
 
 **Answer prompts mid-script.** A script that calls `input()` halfway through
 stops and waits, exactly as it would in a terminal. The panel detects the prompt,
@@ -413,6 +452,7 @@ app/
     kpis.py            the four KPIs and the pivot
     projections.py     straight-line month and year projections
     analytics.py       moving averages, alert rules, presets
+    data_health.py     freshness, row volume and source checks
   data/
     schema.py          the canonical table every workbook becomes
     excel_loader.py    discovery, column mapping, normalisation
@@ -429,6 +469,7 @@ app/
   admin/
     registry.py        script discovery and run-order persistence
     runner.py          subprocess execution with interactive stdin
+    lock.py            single-holder run lock, with stale detection
 config/                config.example.yaml (committed) + config.yaml (yours)
 deploy/                systemd unit for running it as a service
 docs/                  deployment.md -- LAN setup, firewall, autostart
@@ -464,6 +505,7 @@ Common fixes:
 | Category 1 and 2 are both zero | The workbook's category values are not in `values` |
 | Rows are missing | Their date cell is text Excel never parsed — see "Skipped (bad date)" |
 | A month projects too high | `count_today_as_elapsed: true` divides by a partial day |
+| Everything looks like a collapse | The feed has stopped updating — check the Data health alerts first |
 
 ---
 

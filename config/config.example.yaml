@@ -176,6 +176,34 @@ analytics:
   preset: "standard"
 
   # ---------------------------------------------------------------------------
+  # DATA HEALTH -- checks on the feed, not on what it says
+  # ---------------------------------------------------------------------------
+  # A broken export and a bad sales week look identical in a moving average: if
+  # the file stops updating, recent days become zeros and the short window
+  # collapses. Without these checks the dashboard would confidently report a
+  # 40% premium slide caused by a dead scheduled job.
+  #
+  # These sort above the performance rules, and a critical one puts a banner on
+  # the Dashboard saying the figures below may be wrong.
+  # ---------------------------------------------------------------------------
+  data_health:
+    enabled: true
+    # Working days between the newest row and today. Counted in WORKING days,
+    # so a Sunday or a long holiday weekend never reads as a broken pipeline.
+    stale_warn_days: 2
+    stale_critical_days: 4
+    # Recent rows per working day against a longer baseline -- catches the
+    # partial export that arrives on time but carries a fraction of the rows,
+    # which the freshness check alone cannot see.
+    volume_window: 15
+    volume_baseline: 90
+    volume_warn_pct: 30
+    volume_critical_pct: 50
+    # Alert when a workbook cannot be read, or a source matches no files at
+    # all, instead of leaving it on Diagnostics for someone to find later.
+    check_sources: true
+
+  # ---------------------------------------------------------------------------
   # RULES -- anything here replaces the preset entirely
   # ---------------------------------------------------------------------------
   # Three kinds, covering both ways a metric can be judged:

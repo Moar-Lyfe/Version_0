@@ -14,7 +14,7 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from app.core import analytics, kpis
+from app.core import analytics, data_health, kpis
 from app.core.analytics import OVERALL, Alert, Severity
 from app.core.calendar_rules import WorkingCalendar
 from app.data import repository
@@ -55,8 +55,37 @@ def _counts_phrase(alerts: list[Alert]) -> str:
     return ", ".join(parts) or "nothing to report"
 
 
-def _summary(alerts: list[Alert], agent_alerts: list[Alert], settings: Settings) -> None:
-    """Book-wide and per-agent counts, kept apart.
+def _data_health(health: list[Alert]) -> None:
+    """Data-quality verdicts, above everything they would otherwise distort."""
+    problems = [alert for alert in health if alert.severity.is_alert]
+    if not problems:
+        return
+
+    components.section("Data health", "checks on the feed, not the numbers")
+    for alert in problems:
+        components.alert_card(
+            alert.rule,
+            alert.message,
+            alert.severity.label,
+            _severity_colour(alert.severity),
+            scope="Data",
+        )
+    if data_health.is_compromised(health):
+        st.warning(
+            "**Read the performance alerts below with that in mind.** A feed that "
+            "has stopped updating turns recent days into zeros, which every "
+            "moving average reads as a collapse in production. Fix the data "
+            "first, then judge the numbers."
+        )
+
+
+def _summary(
+    alerts: list[Alert],
+    agent_alerts: list[Alert],
+    health: list[Alert],
+    settings: Settings,
+) -> None:
+    """Book-wide, per-agent and data-health counts, kept apart.
 
     Rolled together they read as a contradiction: "5 critical" beside a panel
     saying every rule is on track, because the criticals were all agent-level.
@@ -66,7 +95,13 @@ def _summary(alerts: list[Alert], agent_alerts: list[Alert], settings: Settings)
         if settings.analytics.basis == analytics.WORKING_DAYS
         else "per calendar day"
     )
-    pills = [f"Book-wide: {_counts_phrase(alerts)}"]
+    pills = []
+    problems = [a for a in health if a.severity.is_alert]
+    if problems:
+        pills.append(f"Data: {_counts_phrase(problems)}")
+    elif health:
+        pills.append("Data: healthy")
+    pills.append(f"Book-wide: {_counts_phrase(alerts)}")
     if settings.analytics.monitor_agents:
         pills.append(
             f"Agents: {_counts_phrase(agent_alerts)}"
@@ -306,7 +341,7 @@ def _rules_reference(settings: Settings) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def load_alerts(settings: Settings, frame: pd.DataFrame, today):
+def load_alerts(settings: Settings, frame: pd.DataFrame, today, result=None):
     """Build the context and evaluate everything. Shared with the Dashboard."""
     calendar = WorkingCalendar.from_settings(settings.calendar)
     context = analytics.build_context(
@@ -314,7 +349,19 @@ def load_alerts(settings: Settings, frame: pd.DataFrame, today):
     )
     alerts = analytics.evaluate(context)
     agent_alerts = analytics.evaluate_agents(context, frame, calendar)
-    return context, alerts, agent_alerts
+    health = (
+        data_health.evaluate(
+            result,
+            frame,
+            today,
+            calendar,
+            settings.analytics.data_health,
+            settings.data,
+        )
+        if result is not None
+        else []
+    )
+    return context, alerts, agent_alerts, health
 
 
 def render(settings: Settings) -> None:
@@ -351,9 +398,12 @@ def render(settings: Settings) -> None:
         return
 
     frame = kpis.apply_web_filter(result.frame, include_web)
-    context, alerts, agent_alerts = load_alerts(settings, frame, today)
+    context, alerts, agent_alerts, health = load_alerts(
+        settings, frame, today, result
+    )
 
-    _summary(alerts, agent_alerts, settings)
+    _summary(alerts, agent_alerts, health, settings)
+    _data_health(health)
 
     if context.history_days < settings.analytics.min_history_days:
         st.warning(

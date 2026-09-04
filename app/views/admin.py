@@ -16,6 +16,7 @@ import pandas as pd
 import streamlit as st
 
 from app import paths
+from app.admin import lock as run_lock
 from app.admin import registry
 from app.admin.registry import Pipeline, Step
 from app.admin.runner import PipelineRunner, RunState
@@ -270,17 +271,45 @@ def _run_controls(settings: AdminSettings, draft: Pipeline) -> None:
     snapshot = runner.snapshot() if runner else None
     active = bool(snapshot and snapshot.state.is_active)
 
+    # The runner lives in per-session state, so a second browser -- or a
+    # scheduled terminal run -- is invisible to it. The on-disk lock is what
+    # actually stops two runs of the same scripts overlapping.
+    holder = run_lock.read()
+    held_elsewhere = bool(holder and not active and not holder.is_ours)
+    if held_elsewhere:
+        stale = run_lock.is_stale(holder, settings.timeout_seconds)
+        if stale:
+            st.warning(
+                f"A run lock is present but looks abandoned — {holder.describe()}. "
+                "Release it if you are sure nothing is still running."
+            )
+            if st.button("Release the stale lock"):
+                run_lock.force_release()
+                st.rerun()
+        else:
+            st.info(
+                f"A pipeline run is already in progress: {holder.describe()}. "
+                "Wait for it to finish rather than starting a second one over "
+                "the top of it."
+            )
+
     start_col, cancel_col = st.columns(2)
     with start_col:
         if st.button(
             "Run pipeline",
             type="primary",
-            disabled=active or not draft.enabled_steps(),
+            disabled=active or held_elsewhere or not draft.enabled_steps(),
             help="Runs the enabled steps in order, stopping on the first failure.",
         ):
             new_runner = PipelineRunner(draft, settings)
-            st.session_state[RUNNER_KEY] = new_runner
-            new_runner.start()
+            if new_runner.start(owner="Admin panel"):
+                st.session_state[RUNNER_KEY] = new_runner
+            else:
+                blocker = new_runner.blocked_by
+                st.error(
+                    "Could not start: another run took the lock first"
+                    + (f" — {blocker.describe()}." if blocker else ".")
+                )
             st.rerun()
     with cancel_col:
         if st.button("Cancel run", disabled=not active) and runner:

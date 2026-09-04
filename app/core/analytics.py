@@ -45,6 +45,7 @@ WORKING_DAYS = "working_days"
 CALENDAR_DAYS = "calendar_days"
 
 OVERALL = "Overall"
+DATA = "Data"
 
 
 class Severity(str, Enum):
@@ -314,11 +315,21 @@ class Alert:
     shortfall_pct: float | None
     message: str
     is_currency: bool
+    # How `current` and `reference` should be read: a per-working-day rate for
+    # performance rules, plain days or counts for the data-health checks.
+    unit: str = "rate"
+
+    @property
+    def is_data_health(self) -> bool:
+        return self.scope == DATA
 
     @property
     def sort_key(self) -> tuple:
         return (
             self.severity.rank,
+            # Data-health problems outrank a performance shortfall of the same
+            # severity: if the data is wrong, the performance reading is noise.
+            not self.is_data_health,
             -(self.shortfall_pct or 0.0),
             self.scope != OVERALL,
             self.rule,

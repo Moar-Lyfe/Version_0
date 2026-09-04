@@ -38,6 +38,7 @@ from enum import Enum
 from pathlib import Path
 
 from app import paths
+from app.admin import lock as run_lock
 from app.admin.registry import Pipeline, Step, resolve_script
 from app.settings import AdminSettings
 
@@ -108,7 +109,7 @@ class PipelineRunner:
 
     def __init__(self, pipeline: Pipeline, settings: AdminSettings) -> None:
         self._settings = settings
-        self._lock = threading.Lock()
+        self._lock_guard = threading.Lock()
         self._continue = threading.Event()
         self._cancel = threading.Event()
         self._thread: threading.Thread | None = None
@@ -128,6 +129,8 @@ class PipelineRunner:
         self._pending_pause: str | None = None
         self._log_path: Path | None = None
         self._log_handle = None
+        self._run_lock: run_lock.RunLock | None = None
+        self.blocked_by: run_lock.RunLock | None = None
 
     # -- public API -------------------------------------------------------- #
 
@@ -135,9 +138,23 @@ class PipelineRunner:
     def has_work(self) -> bool:
         return bool(self._plan)
 
-    def start(self) -> None:
+    def start(self, owner: str = "Admin panel") -> bool:
+        """Begin the run. ``False`` means another run already holds the lock.
+
+        The lock is process-wide and on disk, so it also covers a second browser
+        session and a scheduled terminal run -- the two cases the per-session
+        runner cannot see by itself.
+        """
         if self._thread and self._thread.is_alive():
-            return
+            return False
+
+        acquired, holder = run_lock.acquire(owner, self._settings.timeout_seconds)
+        if acquired is None:
+            self.blocked_by = holder
+            return False
+        self._run_lock = acquired
+        self.blocked_by = None
+
         paths.ensure_runtime_dirs()
         stamp = datetime.now().astimezone()
         self._log_path = paths.RUN_LOG_DIR / f"run_{stamp:%Y%m%d_%H%M%S}.log"
@@ -145,18 +162,19 @@ class PipelineRunner:
             self._log_handle = self._log_path.open("a", encoding="utf-8")
         except OSError:
             self._log_handle = None
-        with self._lock:
+        with self._lock_guard:
             self._state = RunState.RUNNING
             self._started_at = stamp
         self._thread = threading.Thread(
             target=self._run, name="pipeline-runner", daemon=True
         )
         self._thread.start()
+        return True
 
     def send_input(self, text: str) -> bool:
         """Write ``text`` plus a newline to the running script's stdin."""
         payload = (text + "\n").encode()
-        with self._lock:
+        with self._lock_guard:
             write_fd = self._write_fd
             process = self._process
         if write_fd is not None:
@@ -172,7 +190,7 @@ class PipelineRunner:
                 return False
         else:
             return False
-        with self._lock:
+        with self._lock_guard:
             if self._state is RunState.WAITING_INPUT:
                 self._state = RunState.RUNNING
             if write_fd is None:
@@ -188,7 +206,7 @@ class PipelineRunner:
         """Stop the current script and abandon the rest of the run."""
         self._cancel.set()
         self._continue.set()
-        with self._lock:
+        with self._lock_guard:
             process = self._process
         if process and process.poll() is None:
             try:
@@ -197,7 +215,7 @@ class PipelineRunner:
                 pass
 
     def snapshot(self) -> Snapshot:
-        with self._lock:
+        with self._lock_guard:
             return Snapshot(
                 state=self._state,
                 transcript="".join(self._transcript),
@@ -237,7 +255,7 @@ class PipelineRunner:
             total -= len(self._transcript.pop(0))
 
     def _emit(self, text: str) -> None:
-        with self._lock:
+        with self._lock_guard:
             self._append(text)
 
     def _environment(self) -> dict[str, str]:
@@ -259,7 +277,7 @@ class PipelineRunner:
                     self._finish(RunState.CANCELLED)
                     return
 
-                with self._lock:
+                with self._lock_guard:
                     self._current = position
 
                 if step.pause_before:
@@ -282,12 +300,12 @@ class PipelineRunner:
 
     def _hold(self, script: str) -> None:
         self._continue.clear()
-        with self._lock:
+        with self._lock_guard:
             self._state = RunState.PAUSED
             self._pending_pause = script
             self._append(f"\n--- Paused before {script}. Waiting for approval. ---\n")
         self._continue.wait()
-        with self._lock:
+        with self._lock_guard:
             self._pending_pause = None
             if not self._cancel.is_set():
                 self._state = RunState.RUNNING
@@ -302,7 +320,7 @@ class PipelineRunner:
                 f"[skipped] {step.script} was not found inside "
                 f"{self._settings.resolved_scripts_dir()}"
             )
-            with self._lock:
+            with self._lock_guard:
                 record.state = RunState.FAILED
                 record.error = message
                 record.finished_at = datetime.now().astimezone()
@@ -312,7 +330,7 @@ class PipelineRunner:
         try:
             extra_args = shlex.split(step.args) if step.args.strip() else []
         except ValueError as exc:
-            with self._lock:
+            with self._lock_guard:
                 record.state = RunState.FAILED
                 record.error = f"Could not parse arguments: {exc}"
                 self._append(f"\n[skipped] {step.script}: {record.error}\n")
@@ -320,7 +338,7 @@ class PipelineRunner:
 
         command = [sys.executable, "-u", str(script_path), *extra_args]
         started = datetime.now().astimezone()
-        with self._lock:
+        with self._lock_guard:
             record.state = RunState.RUNNING
             record.started_at = started
             self._append(
@@ -334,7 +352,7 @@ class PipelineRunner:
         exit_code = self._execute(command, self._working_dir(script_path))
 
         finished = datetime.now().astimezone()
-        with self._lock:
+        with self._lock_guard:
             record.exit_code = exit_code
             record.finished_at = finished
             if self._cancel.is_set():
@@ -384,7 +402,7 @@ class PipelineRunner:
             return 127
         os.close(slave)
 
-        with self._lock:
+        with self._lock_guard:
             self._process = process
             self._write_fd = master
 
@@ -416,7 +434,7 @@ class PipelineRunner:
                     if not data:
                         break
                     last_output = time.monotonic()
-                    with self._lock:
+                    with self._lock_guard:
                         self._append(data.decode("utf-8", errors="replace"))
                         if self._state is RunState.WAITING_INPUT:
                             self._state = RunState.RUNNING
@@ -426,7 +444,7 @@ class PipelineRunner:
                     self._maybe_flag_prompt(last_output)
         finally:
             self._drain_pty(master)
-            with self._lock:
+            with self._lock_guard:
                 self._write_fd = None
             try:
                 os.close(master)
@@ -434,7 +452,7 @@ class PipelineRunner:
                 pass
 
         code = process.wait()
-        with self._lock:
+        with self._lock_guard:
             self._process = None
             if self._state is RunState.WAITING_INPUT:
                 self._state = RunState.RUNNING
@@ -452,7 +470,7 @@ class PipelineRunner:
                 return
             if not data:
                 return
-            with self._lock:
+            with self._lock_guard:
                 self._append(data.decode("utf-8", errors="replace"))
 
     # -- Windows fallback --------------------------------------------------- #
@@ -472,7 +490,7 @@ class PipelineRunner:
             self._emit(f"[launch failed] {exc}\n")
             return 127
 
-        with self._lock:
+        with self._lock_guard:
             self._process = process
 
         last_output = time.monotonic()
@@ -486,7 +504,7 @@ class PipelineRunner:
                 if not chunk:
                     return
                 last_output = time.monotonic()
-                with self._lock:
+                with self._lock_guard:
                     self._append(chunk.decode("utf-8", errors="replace"))
                     if self._state is RunState.WAITING_INPUT:
                         self._state = RunState.RUNNING
@@ -512,7 +530,7 @@ class PipelineRunner:
         stop.set()
         reader.join(timeout=1.0)
         code = process.wait()
-        with self._lock:
+        with self._lock_guard:
             self._process = None
             if self._state is RunState.WAITING_INPUT:
                 self._state = RunState.RUNNING
@@ -524,7 +542,7 @@ class PipelineRunner:
         """Flip to WAITING_INPUT when output stalls mid-line, i.e. on a prompt."""
         if time.monotonic() - last_output < PROMPT_IDLE_SECONDS:
             return
-        with self._lock:
+        with self._lock_guard:
             if self._state is not RunState.RUNNING:
                 return
             tail = "".join(self._transcript[-4:])
@@ -541,7 +559,7 @@ class PipelineRunner:
             pass
 
     def _finish(self, state: RunState) -> None:
-        with self._lock:
+        with self._lock_guard:
             self._state = state
             self._finished_at = datetime.now().astimezone()
             self._current = -1
@@ -552,3 +570,7 @@ class PipelineRunner:
             except OSError:
                 pass
             self._log_handle = None
+        # Released last, so nothing else can start while this run is winding up.
+        if self._run_lock is not None:
+            run_lock.release(self._run_lock.token)
+            self._run_lock = None

@@ -27,7 +27,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.core import analytics, kpis  # noqa: E402
+from app.core import analytics, data_health, kpis  # noqa: E402
 from app.core.analytics import OVERALL, Severity  # noqa: E402
 from app.core.calendar_rules import WorkingCalendar  # noqa: E402
 from app.data.excel_loader import load_dataset  # noqa: E402
@@ -64,6 +64,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--no-agents", action="store_true", help="Skip per-agent rules.")
     parser.add_argument(
+        "--no-data-health",
+        action="store_true",
+        help="Skip the freshness, volume and source checks.",
+    )
+    parser.add_argument(
         "--exclude-web", action="store_true", help="Drop web-originated rows first."
     )
     parser.add_argument("--json", action="store_true", help="Emit JSON on stdout.")
@@ -87,10 +92,25 @@ def main() -> int:
     calendar = WorkingCalendar.from_settings(settings.calendar)
     today = settings.app.today()
 
+    health = (
+        []
+        if args.no_data_health
+        else data_health.evaluate(
+            result,
+            frame,
+            today,
+            calendar,
+            settings.analytics.data_health,
+            settings.data,
+        )
+    )
+
     context = analytics.build_context(
         frame, settings.analytics, settings.data, calendar, today
     )
-    alerts = analytics.evaluate(context)
+    # Data health first: a stalled feed makes every performance rule fire for
+    # the wrong reason, so it must be the first thing a reader sees.
+    alerts = health + analytics.evaluate(context)
     if not args.no_agents:
         alerts += analytics.evaluate_agents(context, frame, calendar)
 
@@ -120,6 +140,12 @@ def main() -> int:
             f"{counts[Severity.CRITICAL]} critical, {counts[Severity.WARNING]} warning, "
             f"{counts[Severity.NO_DATA]} without data, {counts[Severity.OK]} on track\n"
         )
+        if data_health.is_compromised(health):
+            print(
+                "DATA PROBLEM: the performance rules below are computed on a feed "
+                "that is not current. Fix the data before acting on them.\n",
+                file=sys.stderr,
+            )
         for alert in alerts:
             if args.quiet and not alert.severity.is_alert:
                 continue

@@ -9,7 +9,7 @@ other module has to know the YAML shape.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -141,6 +141,32 @@ class AlertRuleSettings:
 
 
 @dataclass(frozen=True)
+class DataHealthSettings:
+    """Checks on the data itself, rather than on what it says.
+
+    These exist because a broken export and a bad sales week look identical in
+    a moving average: if the file stops updating, recent days become zeros and
+    the short window collapses. Without these, the dashboard would confidently
+    report a 40% premium slide caused by a dead scheduled job.
+    """
+
+    enabled: bool = True
+    # Working days between the newest row and today before it is suspicious.
+    stale_warn_days: int = 2
+    stale_critical_days: int = 4
+    # Recent row volume against its own longer baseline, to catch a partial
+    # export that still carries today's date.
+    volume_window: int = 15
+    volume_baseline: int = 90
+    volume_warn_pct: float = 30.0
+    volume_critical_pct: float = 50.0
+    # Raise an alert when a workbook could not be read or a source matched
+    # nothing, rather than leaving it on the Diagnostics page for someone to
+    # find later.
+    check_sources: bool = True
+
+
+@dataclass(frozen=True)
 class AnalyticsSettings:
     enabled: bool = True
     # Moving-average windows offered on the page, in days.
@@ -158,6 +184,7 @@ class AnalyticsSettings:
     agent_min_sales: float = 5.0
     preset: str = "standard"
     rules: tuple[AlertRuleSettings, ...] = ()
+    data_health: DataHealthSettings = field(default_factory=DataHealthSettings)
 
 
 @dataclass(frozen=True)
@@ -331,6 +358,45 @@ def _parse_analytics(raw: dict[str, Any], warnings: list[str]) -> AnalyticsSetti
         if rule is not None:
             rules.append(rule)
 
+    health_raw = raw.get("data_health") or {}
+    health_defaults = DataHealthSettings()
+    data_health = DataHealthSettings(
+        enabled=bool(health_raw.get("enabled", health_defaults.enabled)),
+        stale_warn_days=_as_int(
+            health_raw.get("stale_warn_days"), health_defaults.stale_warn_days
+        ),
+        stale_critical_days=_as_int(
+            health_raw.get("stale_critical_days"), health_defaults.stale_critical_days
+        ),
+        volume_window=_as_int(
+            health_raw.get("volume_window"), health_defaults.volume_window
+        ),
+        volume_baseline=_as_int(
+            health_raw.get("volume_baseline"), health_defaults.volume_baseline
+        ),
+        volume_warn_pct=(
+            _as_float(health_raw.get("volume_warn_pct"))
+            or health_defaults.volume_warn_pct
+        ),
+        volume_critical_pct=(
+            _as_float(health_raw.get("volume_critical_pct"))
+            or health_defaults.volume_critical_pct
+        ),
+        check_sources=bool(
+            health_raw.get("check_sources", health_defaults.check_sources)
+        ),
+    )
+    if data_health.volume_baseline <= data_health.volume_window:
+        warnings.append(
+            "analytics.data_health.volume_baseline must be longer than "
+            "volume_window; using defaults for both."
+        )
+        data_health = replace(
+            data_health,
+            volume_window=health_defaults.volume_window,
+            volume_baseline=health_defaults.volume_baseline,
+        )
+
     return AnalyticsSettings(
         enabled=bool(raw.get("enabled", defaults.enabled)),
         windows=tuple(sorted(set(windows))) or defaults.windows,
@@ -341,6 +407,7 @@ def _parse_analytics(raw: dict[str, Any], warnings: list[str]) -> AnalyticsSetti
         agent_min_sales=_as_float(raw.get("agent_min_sales")) or defaults.agent_min_sales,
         preset=str(raw.get("preset") or defaults.preset).strip().lower(),
         rules=tuple(rules),
+        data_health=data_health,
     )
 
 

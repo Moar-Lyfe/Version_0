@@ -17,7 +17,7 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 
-from app.core import analytics, kpis, projections
+from app.core import analytics, data_health, kpis, projections
 from app.core.calendar_rules import WorkingCalendar
 from app.core.periods import MONTH, PERIOD_ORDER, build_periods
 from app.data import repository
@@ -241,20 +241,54 @@ def _breakdown(settings: Settings, frame: pd.DataFrame, period) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _alert_banner(settings: Settings, frame: pd.DataFrame, today: date) -> None:
-    """One line saying whether anything on the Analytics page needs attention.
+def _alert_banner(
+    settings: Settings, result, frame: pd.DataFrame, today: date
+) -> None:
+    """One line saying whether anything needs attention.
 
-    Only the book-wide rules are evaluated here -- the per-agent sweep is the
-    Analytics page's job and costs more than a dashboard rerun should.
+    Data health is checked first and reported on its own. A stalled feed makes
+    every moving average look like a collapse, so leading with "premium is down
+    40%" when the real answer is "the export died on Tuesday" would send people
+    after the wrong problem.
+
+    Only the book-wide performance rules are evaluated here -- the per-agent
+    sweep belongs to the Analytics page and costs more than a dashboard rerun
+    should.
     """
     if not settings.analytics.enabled:
         return
 
     calendar = WorkingCalendar.from_settings(settings.calendar)
+    health = data_health.evaluate(
+        result, frame, today, calendar, settings.analytics.data_health, settings.data
+    )
+    health_problems = [a for a in health if a.severity.is_alert]
+
+    if data_health.is_compromised(health):
+        worst = health_problems[0]
+        components.alert_card(
+            "Data problem — figures below may be wrong",
+            worst.message,
+            worst.severity.label,
+            STATUS.get(worst.severity.value, STATUS["no_data"]),
+            scope="Data",
+        )
+        return
+
     context = analytics.build_context(
         frame, settings.analytics, settings.data, calendar, today
     )
     alerts = [a for a in analytics.evaluate(context) if a.severity.is_alert]
+
+    for alert in health_problems:
+        components.alert_card(
+            alert.rule,
+            alert.message,
+            alert.severity.label,
+            STATUS.get(alert.severity.value, STATUS["no_data"]),
+            scope="Data",
+        )
+
     if not alerts:
         return
 
@@ -313,7 +347,7 @@ def render(settings: Settings) -> None:
 
     frame = kpis.apply_web_filter(result.frame, include_web)
 
-    _alert_banner(settings, frame, today)
+    _alert_banner(settings, result, frame, today)
 
     period_key = widgets.choice(
         "Reporting period",

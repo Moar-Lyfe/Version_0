@@ -22,6 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from app.admin import lock as run_lock  # noqa: E402
 from app.admin import registry  # noqa: E402
 from app.settings import load_settings  # noqa: E402
 
@@ -45,6 +46,11 @@ def main() -> int:
     parser.add_argument("--all", action="store_true", help="Ignore the saved order.")
     parser.add_argument(
         "--yes", action="store_true", help="Auto-approve every pause-before step."
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Take the run lock even if another run appears to hold it.",
     )
     args = parser.parse_args()
 
@@ -73,6 +79,31 @@ def main() -> int:
         print("Nothing to run.")
         return 1
 
+    # The same lock the Admin panel takes, so a scheduled run and a browser
+    # cannot execute these scripts over the top of each other.
+    acquired, holder = run_lock.acquire("terminal", admin.timeout_seconds)
+    if acquired is None:
+        if args.force and holder is not None:
+            print(f"Forcing past the existing lock: {holder.describe()}", file=sys.stderr)
+            run_lock.force_release()
+            acquired, holder = run_lock.acquire("terminal", admin.timeout_seconds)
+        if acquired is None:
+            print(
+                "A pipeline run is already in progress: "
+                f"{holder.describe() if holder else 'unknown holder'}.\n"
+                "Wait for it to finish, or re-run with --force if you are certain "
+                "it is dead.",
+                file=sys.stderr,
+            )
+            return 2
+
+    try:
+        return _run_steps(steps, admin, root, args)
+    finally:
+        run_lock.release(acquired.token)
+
+
+def _run_steps(steps, admin, root, args) -> int:
     for index, step in enumerate(steps, start=1):
         script_path = registry.resolve_script(admin, step.script)
         if script_path is None:

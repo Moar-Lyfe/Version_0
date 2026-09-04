@@ -5,6 +5,7 @@ import time
 import pytest
 
 from app import paths
+from app.admin import lock as run_lock
 from app.admin.registry import Pipeline, Step
 from app.admin.runner import PipelineRunner, RunState
 from app.settings import AdminSettings
@@ -17,6 +18,9 @@ def isolated_runtime(tmp_path, monkeypatch):
     runtime = tmp_path / "runtime"
     monkeypatch.setattr(paths, "RUNTIME_DIR", runtime)
     monkeypatch.setattr(paths, "RUN_LOG_DIR", runtime / "logs")
+    # The run lock too: without this the suite would take, and could leave
+    # behind, the real project lock.
+    monkeypatch.setattr(paths, "RUN_LOCK_FILE", runtime / "pipeline.lock")
 
 
 @pytest.fixture
@@ -153,3 +157,59 @@ def test_cancel_stops_a_waiting_script(admin):
     runner.cancel()
     snapshot = drain(runner)
     assert snapshot.state is RunState.CANCELLED
+
+
+# --------------------------------------------------------------------------- #
+# The run lock
+# --------------------------------------------------------------------------- #
+
+
+def test_only_one_run_at_a_time(admin):
+    """The defect this closes: the runner is per-session, so two browsers -- or
+    a browser and a scheduled terminal run -- could execute the same scripts
+    concurrently over the same output files."""
+    first = PipelineRunner(Pipeline(steps=[Step(script="ask.py")]), admin)
+    assert first.start() is True
+
+    second = PipelineRunner(Pipeline(steps=[Step(script="ok.py")]), admin)
+    assert second.start() is False
+    assert second.blocked_by is not None
+    assert second.snapshot().state is RunState.IDLE
+
+    first.cancel()
+    drain(first)
+
+    # Once the first run releases, the next one proceeds normally.
+    third = PipelineRunner(Pipeline(steps=[Step(script="ok.py")]), admin)
+    assert third.start() is True
+    assert drain(third).state is RunState.FINISHED
+
+
+def test_the_lock_is_released_when_a_run_fails(admin):
+    runner = PipelineRunner(Pipeline(steps=[Step(script="boom.py")]), admin)
+    assert runner.start() is True
+    assert drain(runner).state is RunState.FAILED
+
+    follow_up = PipelineRunner(Pipeline(steps=[Step(script="ok.py")]), admin)
+    assert follow_up.start() is True
+    drain(follow_up)
+
+
+def test_the_lock_is_released_when_a_run_is_cancelled(admin):
+    runner = PipelineRunner(Pipeline(steps=[Step(script="ask.py")]), admin)
+    assert runner.start() is True
+    deadline = time.time() + TIMEOUT
+    while time.time() < deadline and runner.snapshot().state is not RunState.WAITING_INPUT:
+        time.sleep(0.1)
+    runner.cancel()
+    drain(runner)
+
+    assert run_lock.read() is None
+
+
+def test_restarting_the_same_runner_is_refused(admin):
+    runner = PipelineRunner(Pipeline(steps=[Step(script="ask.py")]), admin)
+    assert runner.start() is True
+    assert runner.start() is False
+    runner.cancel()
+    drain(runner)
