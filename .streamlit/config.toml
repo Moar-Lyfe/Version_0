@@ -10,18 +10,30 @@ textColor = "#12120f"
 font = "sans serif"
 
 [server]
-# Bind to every interface so the dashboard is reachable from a phone on the
-# same network. Set to "localhost" to restrict it to this machine.
+# This dashboard is intended for the local network only -- never port-forward
+# 8501 or expose it to the internet. See docs/deployment.md.
+#
+# 0.0.0.0 listens on every interface, which is what makes phone access work out
+# of the box. On a machine with more than one network card, name the LAN address
+# explicitly instead (e.g. "192.168.1.50") so it can never start listening
+# somewhere unintended. "localhost" restricts it to this machine alone.
 address = "0.0.0.0"
 port = 8501
 headless = true
+# Leave XSRF protection on. Disabling it is only ever needed for reverse-proxy
+# setups, and this app is meant to be reached directly on the LAN.
+enableXsrfProtection = true
 # Reruns on file change are a developer convenience, not a reporting one.
 fileWatcherType = "auto"
 maxUploadSize = 50
 
 [browser]
+# No telemetry. The app makes no outbound requests of any kind; it runs happily
+# on a machine with no internet access at all.
 gatherUsageStats = false
 
 [client]
+# Real tracebacks on the page are what make Diagnostics useful. Set to "none" if
+# the network is less trusted than the room.
 showErrorDetails = "full"
 toolbarMode = "minimal"

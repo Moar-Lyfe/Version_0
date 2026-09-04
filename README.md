@@ -265,16 +265,33 @@ python tools/run_pipeline.py --yes     # auto-approve the pause-before steps
 
 ---
 
-## Sharing it with the team
+## Sharing it on the local network
 
-`.streamlit/config.toml` binds to `0.0.0.0:8501`, so anyone on the same network
-can open `http://<the-machine's-ip>:8501` — including from a phone, which is
-what the mobile layout is for. To keep it to one machine, set
-`address = "localhost"`.
+This is a **LAN-only** application. It is meant to run on one machine and be
+opened by everyone else over `http://<that-machine>:8501` — including from a
+phone, which is what the mobile layout is for. `.streamlit/config.toml` binds to
+`0.0.0.0:8501` so that works out of the box; `address = "localhost"` restricts
+it to one machine.
 
-For anything beyond a trusted LAN, put it behind your own reverse proxy and
-authentication. Streamlit has no built-in user accounts, and the optional
-`admin.password_env` gate protects only the Admin panel, not the data.
+**It makes no outbound requests.** Loading every page, switching every period
+and rendering the chart contacts nothing but the dashboard's own port —
+Streamlit serves its own JavaScript, the chart runtime is bundled rather than
+pulled from a CDN, the theme uses system fonts, and telemetry is off. It runs
+fine on a machine with no internet access.
+
+Two things LAN-only does *not* solve, both covered in
+**[docs/deployment.md](docs/deployment.md)**:
+
+- Streamlit has no user accounts, so anyone who can reach the port sees
+  everything. Do not port-forward 8501; if it is needed off-site, use a VPN.
+- The Admin panel runs Python as the service user, so anyone who can reach the
+  page can run those scripts. Gate it with `admin.password_env`, or set
+  `admin.enabled: false` and drive the pipeline from a terminal instead.
+
+That guide also covers binding to a single interface, firewall rules scoped to
+your subnet, and starting the dashboard automatically at boot — a ready systemd
+unit is in [`deploy/`](deploy/), with the Windows Task Scheduler and launchd
+equivalents written out.
 
 ---
 
@@ -306,6 +323,8 @@ app/
     registry.py        script discovery and run-order persistence
     runner.py          subprocess execution with interactive stdin
 config/                config.example.yaml (committed) + config.yaml (yours)
+deploy/                systemd unit for running it as a service
+docs/                  deployment.md -- LAN setup, firewall, autostart
 scripts/               example pipeline scripts
 tools/                 sample-data generator, terminal pipeline runner
 tests/                 pytest suite

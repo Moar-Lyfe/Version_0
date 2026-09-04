@@ -1,0 +1,60 @@
+# systemd unit for the Executive Dashboard (Linux).
+#
+# Install:
+#   sudo cp deploy/executive-dashboard.service /etc/systemd/system/
+#   sudo nano /etc/systemd/system/executive-dashboard.service   # edit the paths
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now executive-dashboard
+#
+# Check on it:
+#   systemctl status executive-dashboard
+#   journalctl -u executive-dashboard -f
+
+[Unit]
+Description=Executive Dashboard (Streamlit)
+Documentation=file:///opt/executive-dashboard/README.md
+After=network-online.target
+Wants=network-online.target
+# Uncomment when the workbooks live on a mount that must be up first:
+# RequiresMountsFor=/mnt/reports
+
+[Service]
+Type=simple
+
+# --- EDIT THESE FOUR ---------------------------------------------------------
+User=dashboard
+Group=dashboard
+WorkingDirectory=/opt/executive-dashboard
+ExecStart=/opt/executive-dashboard/.venv/bin/python -m streamlit run app/main.py
+# -----------------------------------------------------------------------------
+#
+# WorkingDirectory must be the project root: Streamlit only reads
+# .streamlit/config.toml relative to the working directory.
+#
+# To bind to one interface instead of every interface, append:
+#   --server.address 192.168.1.50
+# Set the Admin panel password here if admin.password_env is configured:
+#   Environment=EXEC_DASH_ADMIN_PASSWORD=...
+# Better still, keep it out of this world-readable file:
+#   EnvironmentFile=/etc/executive-dashboard.env    (chmod 600)
+
+Environment=PYTHONUNBUFFERED=1
+
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+
+# Hardening. The dashboard only ever reads workbooks and writes runtime/ and
+# exports/, so it needs very little. Loosen ReadWritePaths if the admin
+# scripts write elsewhere.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/opt/executive-dashboard/runtime /opt/executive-dashboard/exports
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target
