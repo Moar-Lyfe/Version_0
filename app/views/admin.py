@@ -24,7 +24,7 @@ from app.settings import AdminSettings, Settings
 from app.ui import components
 from app.views import widgets
 
-RUNNER_KEY = "pipeline_runner"
+RUNNER_KEY = "pipeline_runner"  # + ":<routine key>"
 POLL_SECONDS = 0.7
 
 _STATE_ICONS = {
@@ -41,6 +41,13 @@ _STATE_ICONS = {
 # --------------------------------------------------------------------------- #
 # Access gate
 # --------------------------------------------------------------------------- #
+
+
+def _forget_runners() -> None:
+    """Drop every routine's runner, e.g. after the scripts folder changes."""
+    for key in list(st.session_state):
+        if str(key).startswith(RUNNER_KEY):
+            st.session_state.pop(key, None)
 
 
 def _authorised(settings: AdminSettings) -> bool:
@@ -75,9 +82,10 @@ def _scripts_directory(settings: AdminSettings) -> AdminSettings:
     root = active.resolved_scripts_dir()
     override = registry.load_dir_override()
 
-    components.section(
-        "Scripts directory",
-        "override saved on this machine" if override else "from config.yaml",
+    st.caption(
+        "Saved on this machine, overriding config.yaml."
+        if override
+        else "From config.yaml."
     )
 
     with st.form("scripts_dir_form"):
@@ -99,11 +107,11 @@ def _scripts_directory(settings: AdminSettings) -> AdminSettings:
     if saved:
         cleaned = value.strip()
         registry.save_dir_override(cleaned or None)
-        st.session_state.pop(RUNNER_KEY, None)
+        _forget_runners()
         st.rerun()
     if reverted:
         registry.save_dir_override(None)
-        st.session_state.pop(RUNNER_KEY, None)
+        _forget_runners()
         st.rerun()
 
     if root.is_dir():
@@ -124,11 +132,13 @@ _COL_PAUSE = "Pause before"
 _COL_ARGS = "Arguments"
 
 
-def _pipeline_editor(settings: AdminSettings, scripts: list[registry.ScriptInfo]) -> Pipeline:
+def _pipeline_editor(
+    settings: AdminSettings,
+    scripts: list[registry.ScriptInfo],
+    key: str = registry.SCRIPTS,
+) -> Pipeline:
     available = [info.relative for info in scripts]
-    pipeline = registry.load_pipeline()
-    if not pipeline.steps:
-        pipeline = registry.default_pipeline(scripts)
+    pipeline = registry.load_pipeline(key, scripts)
 
     components.section("Run order", f"{len(available)} script(s) available")
 
@@ -160,7 +170,7 @@ def _pipeline_editor(settings: AdminSettings, scripts: list[registry.ScriptInfo]
 
     edited = st.data_editor(
         frame,
-        key="pipeline_editor",
+        key=f"pipeline_editor_{key}",
         hide_index=True,
         num_rows="dynamic",
         column_config={
@@ -193,6 +203,9 @@ def _pipeline_editor(settings: AdminSettings, scripts: list[registry.ScriptInfo]
     ordered = ordered.sort_values(_COL_ORDER, kind="stable")
 
     draft = Pipeline(
+        key=key,
+        label=pipeline.label,
+        description=pipeline.description,
         steps=[
             Step(
                 script=str(row[_COL_SCRIPT]),
@@ -204,21 +217,17 @@ def _pipeline_editor(settings: AdminSettings, scripts: list[registry.ScriptInfo]
         ]
     )
 
-    save, reset, add = st.columns(3)
+    save, reset = st.columns(2)
     with save:
-        if st.button("Save run order", type="primary"):
+        if st.button("Save run order", type="primary", key=f"save_{key}"):
             registry.save_pipeline(draft)
             st.success("Run order saved.")
     with reset:
-        if st.button("Reset to filename order"):
-            registry.save_pipeline(registry.default_pipeline(scripts))
-            st.rerun()
-    with add:
-        if st.button("Add every script"):
-            registry.save_pipeline(registry.default_pipeline(scripts))
+        if st.button("Reset to the default", key=f"reset_{key}"):
+            registry.reset_pipeline(key)
             st.rerun()
 
-    with st.expander("What each script does", expanded=False):
+    with st.expander("What each script does", expanded=False, key=f"docs_{key}"):
         widgets.dataframe(
             pd.DataFrame(
                 [
@@ -267,7 +276,8 @@ def _status_table(snapshot) -> None:
 def _run_controls(settings: AdminSettings, draft: Pipeline) -> None:
     components.section("Execution", f"{len(draft.enabled_steps())} enabled step(s)")
 
-    runner: PipelineRunner | None = st.session_state.get(RUNNER_KEY)
+    state_key = f"{RUNNER_KEY}:{draft.key}"
+    runner: PipelineRunner | None = st.session_state.get(state_key)
     snapshot = runner.snapshot() if runner else None
     active = bool(snapshot and snapshot.state.is_active)
 
@@ -283,7 +293,7 @@ def _run_controls(settings: AdminSettings, draft: Pipeline) -> None:
                 f"A run lock is present but looks abandoned — {holder.describe()}. "
                 "Release it if you are sure nothing is still running."
             )
-            if st.button("Release the stale lock"):
+            if st.button("Release the stale lock", key=f"release_{draft.key}"):
                 run_lock.force_release()
                 st.rerun()
         else:
@@ -297,13 +307,14 @@ def _run_controls(settings: AdminSettings, draft: Pipeline) -> None:
     with start_col:
         if st.button(
             "Run pipeline",
+            key=f"run_{draft.key}",
             type="primary",
             disabled=active or held_elsewhere or not draft.enabled_steps(),
             help="Runs the enabled steps in order, stopping on the first failure.",
         ):
             new_runner = PipelineRunner(draft, settings)
-            if new_runner.start(owner="Admin panel"):
-                st.session_state[RUNNER_KEY] = new_runner
+            if new_runner.start(owner=f"Admin panel — {draft.label}"):
+                st.session_state[state_key] = new_runner
             else:
                 blocker = new_runner.blocked_by
                 st.error(
@@ -312,7 +323,7 @@ def _run_controls(settings: AdminSettings, draft: Pipeline) -> None:
                 )
             st.rerun()
     with cancel_col:
-        if st.button("Cancel run", disabled=not active) and runner:
+        if st.button("Cancel run", key=f"cancel_{draft.key}", disabled=not active) and runner:
             runner.cancel()
             st.rerun()
 
@@ -327,11 +338,11 @@ def _run_controls(settings: AdminSettings, draft: Pipeline) -> None:
         st.warning(f"Paused before **{snapshot.pending_pause}**. Approve to continue.")
         approve, stop = st.columns(2)
         with approve:
-            if st.button("Continue", type="primary"):
+            if st.button("Continue", type="primary", key=f"continue_{draft.key}"):
                 runner.resume()
                 st.rerun()
         with stop:
-            if st.button("Stop here"):
+            if st.button("Stop here", key=f"stop_{draft.key}"):
                 runner.cancel()
                 st.rerun()
 
@@ -340,7 +351,7 @@ def _run_controls(settings: AdminSettings, draft: Pipeline) -> None:
         st.info(f"The script is asking: **{prompt[-1].strip() if prompt else '…'}**")
 
     if snapshot.state in (RunState.RUNNING, RunState.WAITING_INPUT):
-        with st.form("stdin_form", clear_on_submit=True):
+        with st.form(f"stdin_form_{draft.key}", clear_on_submit=True):
             answer = st.text_input(
                 "Reply to the script",
                 placeholder="Type the answer and press Send (blank sends Enter)",
@@ -384,10 +395,30 @@ def _run_controls(settings: AdminSettings, draft: Pipeline) -> None:
 # --------------------------------------------------------------------------- #
 
 
+def _routine(
+    settings: AdminSettings, scripts: list[registry.ScriptInfo], key: str
+) -> None:
+    """One named routine: what it is, its run order, and its console."""
+    label, description = registry.PIPELINE_META.get(key, (key, ""))
+    if description:
+        st.caption(description)
+
+    if not scripts:
+        components.empty_state(
+            "No scripts found",
+            "Nothing in the scripts folder matches the configured pattern. "
+            "Check the folder under **Settings** below.",
+        )
+        return
+
+    draft = _pipeline_editor(settings, scripts, key)
+    _run_controls(settings, draft)
+
+
 def render(settings: Settings) -> None:
     components.masthead("Admin", settings.app.organization)
     components.subhead(
-        "Run the reporting scripts in order, and answer them when they ask."
+        "Run the reporting routines, and answer them when they ask."
     )
 
     if not settings.admin.enabled:
@@ -400,10 +431,22 @@ def render(settings: Settings) -> None:
     if not _authorised(settings.admin):
         return
 
-    active = _scripts_directory(settings.admin)
+    active = registry.effective_admin_settings(settings.admin)
     scripts = registry.discover(active)
-    draft = _pipeline_editor(active, scripts)
-    _run_controls(active, draft)
+
+    # One lock covers all three, so a run in progress is visible from whichever
+    # tab you happen to be on rather than only the one that started it.
+    holder = run_lock.read()
+    if holder and not holder.is_ours:
+        st.info(f"A run is in progress: {holder.describe()}")
+
+    labels = [registry.PIPELINE_META[key][0] for key in registry.PIPELINE_ORDER]
+    for tab, key in zip(st.tabs(labels), registry.PIPELINE_ORDER):
+        with tab:
+            _routine(active, scripts, key)
+
+    components.section("Settings", "where the scripts live")
+    _scripts_directory(settings.admin)
 
     with st.expander("Recent run logs", expanded=False):
         logs = sorted(paths.RUN_LOG_DIR.glob("run_*.log"), reverse=True)[:10]

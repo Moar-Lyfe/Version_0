@@ -15,9 +15,8 @@ from datetime import datetime
 
 import streamlit as st
 
-from app.data import postgres_loader
 from app.data.excel_loader import LoadResult, fingerprint
-from app.data.excel_loader import load_dataset as load_excel
+from app.data.loader import load_for_source
 from app.settings import POSTGRES, DataSettings, Settings
 
 _REFRESH_TOKEN = "data_refresh_token"
@@ -30,9 +29,7 @@ def _cached_load(_settings: DataSettings, signature: str, token: int) -> LoadRes
     ``_settings`` is prefixed with an underscore so Streamlit does not try to
     hash the dataclass; ``signature`` already changes whenever the source does.
     """
-    if _settings.source_type == POSTGRES:
-        return postgres_loader.load_dataset(_settings)
-    return load_excel(_settings)
+    return load_for_source(_settings)
 
 
 def source_signature(settings: DataSettings) -> str:

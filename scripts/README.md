@@ -4,6 +4,17 @@ Everything in this folder is discoverable by the dashboard's **Admin** page,
 which can order the scripts, run them one after another, and answer any prompt a
 script writes to the terminal.
 
+The panel groups them into three routines, each with its own saved order:
+
+| Routine | Default steps |
+|---|---|
+| **ETL** | `03_load_excel_to_database.py` |
+| **Morning Maintenance** | `01_validate_sources.py` → `03_load_excel_to_database.py` → `04_daily_snapshot.py` → `05_alert_check.py` |
+| **Scripts** | everything here, filename order |
+
+A routine silently omits any default step it cannot find, so a half-populated
+folder still gives a usable panel. Change any of them in the panel and save.
+
 Point the panel somewhere else by editing `admin.scripts_dir` in
 `config/config.yaml` — a shared drive, an existing ETL folder, anywhere:
 

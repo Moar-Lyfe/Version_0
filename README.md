@@ -524,10 +524,30 @@ admin:
   environment: {}                 # extra env vars for every script
 ```
 
+### Three routines
+
+The panel is split into named routines, each with its own saved run order:
+
+| Routine | What it does |
+|---|---|
+| **ETL** | Move the latest Excel export into the reporting database. Asks before it writes |
+| **Morning Maintenance** | The start-of-day sequence: check the sources are reachable → load overnight's export → record what is being reported → judge it |
+| **Scripts** | Everything else in the scripts folder, in whatever order you set |
+
+They share one run lock, because they share one database and one set of output
+files — a run started in any tab is visible from all of them.
+
 **Set the order.** The run-order table takes an `Order` number, an `Enabled`
 box, a `Pause before` box and free-form `Arguments` per step. Renumber, save,
-and it persists in `runtime/pipeline.json`. Steps run lowest-number first and
-the pipeline stops on the first non-zero exit.
+and it persists in `runtime/pipelines.json` per routine. Steps run lowest-number
+first and the routine stops on the first non-zero exit. **Reset to the default**
+forgets a routine's saved order.
+
+Morning Maintenance ends with the alert check, which deliberately exits 0 even
+when metrics are slipping: "the business is down" and "the script failed" are
+different things, and a routine that ends red for the first would teach people
+to ignore the second. `tools/check_alerts.py` keeps the meaningful exit codes,
+for the scheduler where they actually signal.
 
 **Only one run at a time.** The runner lives in per-browser state, so without a
 guard two people with the panel open — or one person in a browser and a
@@ -568,6 +588,56 @@ python tools/run_pipeline.py --list    # show it without running
 python tools/run_pipeline.py --all     # every script, filename order
 python tools/run_pipeline.py --yes     # auto-approve the pause-before steps
 ```
+
+---
+
+## Database page
+
+Everything about the reporting database in one place: whether it is reachable,
+what it holds, what the ETL has been doing, and a console for when you need to
+ask it something directly.
+
+- **Connection** — server version, target, and where the password came from.
+- **Contents** — exact row count, premium total, date range and distinct agents,
+  plus every table's size. Row counts in the table list are the planner's
+  estimates; the headline figure is an exact count.
+- **Load history** — the last twenty ETL runs, with what each one inserted,
+  updated and left alone.
+- **Console** — SQL, with examples to start from.
+- **Maintenance** — apply `db/schema.sql`, `ANALYZE`, `VACUUM`.
+
+### The console is read-only, and PostgreSQL is what enforces it
+
+Statements run inside a **`READ ONLY` transaction**, so the engine refuses to
+write however the SQL is phrased. That matters more than it sounds: inspecting
+the statement text is guesswork that gets it wrong the first time someone writes
+
+```sql
+WITH gone AS (DELETE FROM sales RETURNING id) SELECT count(*) FROM gone
+```
+
+which begins with `SELECT` and deletes the table. The engine rejects it; a
+regular expression would not have.
+
+Every statement also carries a timeout (15s by default), and results are capped
+at 500 rows — a missing `WHERE` should waste a few seconds, not lock the
+database for an afternoon.
+
+**Writes and maintenance are off by default**, because anyone who can reach this
+page on the LAN can reach this console. Turn one on while you need it:
+
+```yaml
+data:
+  postgres:
+    console:
+      allow_writes: false        # lets the console change data
+      allow_maintenance: false   # lets it apply the schema, ANALYZE, VACUUM
+      row_limit: 500
+      statement_timeout_seconds: 15
+```
+
+With `allow_writes: false`, ticking **Write mode** in the UI does nothing — the
+config is the gate, not the checkbox.
 
 ---
 
@@ -623,6 +693,8 @@ app/
     postgres_loader.py the same canonical table, read from the database
     database.py        connections, and errors phrased for a human
     etl.py             Excel -> CSV -> Postgres, as a library
+    db_console.py      guarded queries, table stats, maintenance
+    loader.py          source dispatch, with no Streamlit attached
     repository.py      source dispatch, caching and the refresh button
   ui/
     theme.py           the stylesheet and number formatting
@@ -631,10 +703,11 @@ app/
   views/
     dashboard.py       the Executive Dashboard page
     analytics.py       moving-average monitoring and alerts
-    admin.py           the Admin panel
+    admin.py           the Admin panel: ETL, Morning Maintenance, Scripts
+    database.py        the Database page and SQL console
     diagnostics.py     "where did this number come from"
   admin/
-    registry.py        script discovery and run-order persistence
+    registry.py        script discovery and per-routine run orders
     runner.py          subprocess execution with interactive stdin
     lock.py            single-holder run lock, with stale detection
 config/                config.example.yaml (committed) + config.yaml (yours)
@@ -644,7 +717,7 @@ docs/                  deployment.md -- LAN setup, firewall, autostart
 scripts/               example pipeline scripts
 tools/                 ETL, sample data, pipeline runner, alerts, snapshots
 tests/                 pytest suite
-runtime/               saved run order and run logs (git-ignored)
+runtime/               run orders, logs, snapshots, ETL CSVs (git-ignored)
 ```
 
 ---

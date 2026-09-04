@@ -66,6 +66,25 @@ class CategorySettings:
 
 
 @dataclass(frozen=True)
+class ConsoleSettings:
+    """The database console's guard rails.
+
+    Read-only is enforced by PostgreSQL itself -- the session runs inside a
+    ``READ ONLY`` transaction, so no amount of clever SQL writes anything. That
+    is a far stronger guarantee than inspecting the statement text, which is
+    guesswork the moment anyone uses a CTE or a function.
+    """
+
+    enabled: bool = True
+    # Off by default. Anyone who can reach the LAN page can reach this console.
+    allow_writes: bool = False
+    row_limit: int = 500
+    statement_timeout_seconds: int = 15
+    # Maintenance buttons (ANALYZE / VACUUM) and applying db/schema.sql.
+    allow_maintenance: bool = False
+
+
+@dataclass(frozen=True)
 class PostgresSettings:
     """Connection and mapping for the reporting database.
 
@@ -88,6 +107,7 @@ class PostgresSettings:
     columns: dict[str, str] = field(default_factory=dict)
     # Extra SQL predicate, without the WHERE. For excluding voided rows, say.
     where: str = ""
+    console: ConsoleSettings = field(default_factory=ConsoleSettings)
 
     DEFAULT_COLUMNS = {
         "date": "sale_date",
@@ -539,6 +559,20 @@ def _parse_postgres(raw: dict[str, Any]) -> PostgresSettings:
         str(k): str(v) for k, v in (raw.get("columns") or {}).items() if str(v).strip()
     }
     password_env = raw.get("password_env", defaults.password_env)
+    console_raw = raw.get("console") or {}
+    console_defaults = ConsoleSettings()
+    console = ConsoleSettings(
+        enabled=bool(console_raw.get("enabled", console_defaults.enabled)),
+        allow_writes=bool(console_raw.get("allow_writes", console_defaults.allow_writes)),
+        row_limit=_as_int(console_raw.get("row_limit"), console_defaults.row_limit),
+        statement_timeout_seconds=_as_int(
+            console_raw.get("statement_timeout_seconds"),
+            console_defaults.statement_timeout_seconds,
+        ),
+        allow_maintenance=bool(
+            console_raw.get("allow_maintenance", console_defaults.allow_maintenance)
+        ),
+    )
     return PostgresSettings(
         host=str(raw.get("host") or defaults.host),
         port=_as_int(raw.get("port"), defaults.port),
@@ -551,6 +585,7 @@ def _parse_postgres(raw: dict[str, Any]) -> PostgresSettings:
         connect_timeout=_as_int(raw.get("connect_timeout"), defaults.connect_timeout),
         columns=columns,
         where=str(raw.get("where") or ""),
+        console=console,
     )
 
 

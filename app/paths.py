@@ -18,7 +18,10 @@ CONFIG_EXAMPLE_FILE = CONFIG_DIR / "config.example.yaml"
 
 # Machine-local state that must never be committed (saved pipelines, run logs).
 RUNTIME_DIR = PROJECT_ROOT / "runtime"
+# Historic single-pipeline file, still read once so an existing run order
+# survives the upgrade into named routines.
 PIPELINE_FILE = RUNTIME_DIR / "pipeline.json"
+PIPELINES_FILE = RUNTIME_DIR / "pipelines.json"
 RUN_LOCK_FILE = RUNTIME_DIR / "pipeline.lock"
 OVERRIDE_FILE = RUNTIME_DIR / "admin_override.json"
 RUN_LOG_DIR = RUNTIME_DIR / "logs"

@@ -85,6 +85,25 @@ data:
     # or pending rows that should never reach reporting.
     where: ""
 
+    # -------------------------------------------------------------------------
+    # THE DATABASE CONSOLE  (the Database page)
+    # -------------------------------------------------------------------------
+    # Read-only is enforced by PostgreSQL, not by inspecting the statement: the
+    # session runs inside a READ ONLY transaction, so the engine refuses to
+    # write however the SQL is phrased -- including a DELETE hidden inside a CTE
+    # that starts with the word SELECT.
+    #
+    # allow_writes and allow_maintenance are both OFF by default, because anyone
+    # who can reach this page on the LAN can reach this console. Turn one on
+    # while you need it, and turn it back off.
+    # -------------------------------------------------------------------------
+    console:
+      enabled: true
+      allow_writes: false        # lets the console change data
+      allow_maintenance: false   # lets it apply db/schema.sql, ANALYZE, VACUUM
+      row_limit: 500
+      statement_timeout_seconds: 15
+
   # ---------------------------------------------------------------------------
   # THE WORKBOOKS  (the ETL's input, and the reporting source when
   # source_type is "excel")

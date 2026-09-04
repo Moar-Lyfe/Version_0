@@ -21,7 +21,13 @@ import streamlit as st  # noqa: E402
 
 from app.settings import load_settings  # noqa: E402
 from app.ui import theme  # noqa: E402
-from app.views import admin, analytics, dashboard, diagnostics  # noqa: E402
+from app.views import (  # noqa: E402
+    admin,
+    analytics,
+    dashboard,
+    database,
+    diagnostics,
+)
 
 
 def main() -> None:
@@ -40,6 +46,7 @@ def main() -> None:
         "Dashboard": lambda: dashboard.render(settings),
         "Analytics": lambda: analytics.render(settings),
         "Admin": lambda: admin.render(settings),
+        "Database": lambda: database.render(settings),
         "Diagnostics": lambda: diagnostics.render(settings),
     }
 

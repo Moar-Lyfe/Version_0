@@ -102,34 +102,10 @@ def _database(settings: Settings, result) -> None:
         with st.expander("Columns present in the table", expanded=False):
             st.code("\n".join(report.headers), language="text")
 
-    runs = postgres_loader.latest_etl_runs(pg, limit=10)
-    with st.expander(f"Recent ETL loads ({len(runs)})", expanded=bool(runs)):
-        if not runs:
-            st.caption(
-                "No load history. `tools/etl_excel_to_postgres.py` records each "
-                "run in the `etl_runs` table; apply `db/schema.sql` if it is "
-                "missing."
-            )
-        else:
-            widgets.dataframe(
-                pd.DataFrame(
-                    [
-                        {
-                            "Started": r["started_at"].strftime("%Y-%m-%d %H:%M"),
-                            "Workbook": r["source_file"] or "—",
-                            "Sheet": r["source_sheet"] or "—",
-                            "Read": r["rows_read"],
-                            "Inserted": r["rows_inserted"],
-                            "Updated": r["rows_updated"],
-                            "Unchanged": r["rows_skipped"],
-                            "Status": r["status"],
-                            "Message": (r["message"] or "")[:120],
-                        }
-                        for r in runs
-                    ]
-                ),
-                hide_index=True,
-            )
+    st.caption(
+        "Load history, table sizes and a query console are on the **Database** "
+        "page."
+    )
 
 
 def _sources(settings: Settings) -> None:

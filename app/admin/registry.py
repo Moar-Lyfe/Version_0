@@ -61,10 +61,56 @@ class Step:
 
 @dataclass
 class Pipeline:
+    """A named, ordered routine.
+
+    The panel runs several -- the ETL load, the morning routine, the general
+    script list -- and they share one run lock, because they share one database
+    and one set of output files.
+    """
+
+    key: str = "scripts"
+    label: str = "Scripts"
+    description: str = ""
     steps: list[Step] = field(default_factory=list)
 
     def enabled_steps(self) -> list[Step]:
         return [step for step in self.steps if step.enabled and step.script]
+
+
+ETL = "etl"
+SCRIPTS = "scripts"
+MORNING = "morning"
+
+PIPELINE_ORDER = (ETL, MORNING, SCRIPTS)
+
+PIPELINE_META: dict[str, tuple[str, str]] = {
+    ETL: (
+        "ETL",
+        "Move the latest Excel export into the reporting database. "
+        "Asks before it writes.",
+    ),
+    MORNING: (
+        "Morning Maintenance",
+        "The start-of-day routine: check the sources are reachable, load "
+        "overnight's export, record what is being reported, then judge it.",
+    ),
+    SCRIPTS: (
+        "Scripts",
+        "Everything else in the scripts folder, in whatever order you set.",
+    ),
+}
+
+# Which scripts each routine wants. A routine omits any it cannot find, so a
+# half-populated scripts folder still gives a usable panel rather than an error.
+PIPELINE_DEFAULTS: dict[str, tuple[str, ...]] = {
+    ETL: ("03_load_excel_to_database.py",),
+    MORNING: (
+        "01_validate_sources.py",
+        "03_load_excel_to_database.py",
+        "04_daily_snapshot.py",
+        "05_alert_check.py",
+    ),
+}
 
 
 _IGNORED_PREFIXES = ("_", ".")
@@ -138,25 +184,79 @@ def resolve_script(settings: AdminSettings, relative: str) -> Path | None:
 # --------------------------------------------------------------------------- #
 
 
-def load_pipeline() -> Pipeline:
-    if not paths.PIPELINE_FILE.exists():
-        return Pipeline()
-    try:
-        raw = json.loads(paths.PIPELINE_FILE.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return Pipeline()
-    return Pipeline(steps=[Step.from_dict(item) for item in raw.get("steps", [])])
+def _meta(key: str) -> tuple[str, str]:
+    return PIPELINE_META.get(key, (key.replace("_", " ").title(), ""))
 
 
-def save_pipeline(pipeline: Pipeline) -> None:
+def default_steps(key: str, scripts: list[ScriptInfo]) -> list[Step]:
+    """A routine's starting order, from the scripts actually present."""
+    available = {info.relative for info in scripts}
+    wanted = PIPELINE_DEFAULTS.get(key)
+    if wanted is None:  # the general list: everything, filename order
+        return [Step(script=info.relative) for info in scripts]
+    return [Step(script=name) for name in wanted if name in available]
+
+
+def _read_all() -> dict[str, list[Step]]:
+    """Saved run orders, keyed by routine."""
+    if paths.PIPELINES_FILE.exists():
+        try:
+            raw = json.loads(paths.PIPELINES_FILE.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return {
+            str(key): [Step.from_dict(item) for item in (value or {}).get("steps", [])]
+            for key, value in (raw.get("pipelines") or {}).items()
+        }
+
+    # Upgrade path: an order saved before routines existed becomes the general
+    # script list rather than being thrown away.
+    if paths.PIPELINE_FILE.exists():
+        try:
+            raw = json.loads(paths.PIPELINE_FILE.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return {SCRIPTS: [Step.from_dict(item) for item in raw.get("steps", [])]}
+
+    return {}
+
+
+def _write_all(saved: dict[str, list[Step]]) -> None:
     paths.ensure_runtime_dirs()
     payload = {
         "saved_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-        "steps": [step.to_dict() for step in pipeline.steps],
+        "pipelines": {
+            key: {"steps": [step.to_dict() for step in steps]}
+            for key, steps in saved.items()
+        },
     }
-    paths.PIPELINE_FILE.write_text(
+    paths.PIPELINES_FILE.write_text(
         json.dumps(payload, indent=2) + "\n", encoding="utf-8"
     )
+
+
+def load_pipeline(
+    key: str = SCRIPTS, scripts: list[ScriptInfo] | None = None
+) -> Pipeline:
+    """One routine's run order: the saved one, else its default."""
+    label, description = _meta(key)
+    steps = _read_all().get(key)
+    if steps is None:
+        steps = default_steps(key, scripts or [])
+    return Pipeline(key=key, label=label, description=description, steps=steps)
+
+
+def save_pipeline(pipeline: Pipeline) -> None:
+    saved = _read_all()
+    saved[pipeline.key] = pipeline.steps
+    _write_all(saved)
+
+
+def reset_pipeline(key: str) -> None:
+    """Forget a routine's saved order so it falls back to its default."""
+    saved = _read_all()
+    saved.pop(key, None)
+    _write_all(saved)
 
 
 # --------------------------------------------------------------------------- #
@@ -197,6 +297,12 @@ def effective_admin_settings(settings: AdminSettings) -> AdminSettings:
     return replace(settings, scripts_dir=override)
 
 
-def default_pipeline(scripts: list[ScriptInfo]) -> Pipeline:
-    """Filename order, everything enabled -- a sensible starting point."""
-    return Pipeline(steps=[Step(script=info.relative) for info in scripts])
+def default_pipeline(scripts: list[ScriptInfo], key: str = SCRIPTS) -> Pipeline:
+    """A routine's starting point, ignoring anything saved."""
+    label, description = _meta(key)
+    return Pipeline(
+        key=key,
+        label=label,
+        description=description,
+        steps=default_steps(key, scripts),
+    )
