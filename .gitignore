@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local configuration & runtime state (machine specific)
+config/config.yaml
+config/config.local.yaml
+runtime/
+.streamlit/secrets.toml
+
+# Data drops -- never commit source workbooks or exports
+data/**/*.xlsx
+data/**/*.xlsm
+data/**/*.xls
+data/**/*.csv
+exports/
+~$*.xlsx
+
+# OS noise
+.DS_Store
+Thumbs.db
+desktop.ini

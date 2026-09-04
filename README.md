@@ -1,0 +1,355 @@
+# Executive Dashboard
+
+An internal reporting dashboard for premium and sales production, built on
+Streamlit. It reads Excel workbooks straight off disk or a network share, shows
+four KPIs across five reporting windows, projects the month and the year off a
+working-day calendar, and breaks any period out by agent.
+
+It also ships an **Admin** panel that runs your other Python scripts in a
+configurable order and lets you answer their terminal prompts from the browser.
+
+- **Clean and minimal.** No chart junk, no colour that does not mean something.
+- **Mobile first.** KPI cards reflow to two across on a phone; everything is
+  reachable with a thumb.
+- **Portable.** Clone, run one script, edit one path. Nothing is machine-specific
+  except `config/config.yaml`, which is git-ignored.
+
+---
+
+## Quick start
+
+### macOS / Linux
+
+```bash
+git clone https://github.com/Moar-Lyfe/Version_0.git
+cd Version_0
+./run.sh
+```
+
+### Windows
+
+```bat
+git clone https://github.com/Moar-Lyfe/Version_0.git
+cd Version_0
+run.bat
+```
+
+The launcher creates a `.venv`, installs dependencies, copies
+`config/config.example.yaml` to `config/config.yaml`, generates sample workbooks
+so the dashboard is not empty, and opens <http://localhost:8501>.
+
+<details>
+<summary>Manual setup, if you would rather not use the launcher</summary>
+
+```bash
+python -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+cp config/config.example.yaml config/config.yaml
+python tools/generate_sample_data.py       # optional demo data
+streamlit run app/main.py
+```
+</details>
+
+**Requirements:** Python 3.10 or newer. Nothing else — no database, no server,
+no Excel installation.
+
+> Start it from the project root (both launchers `cd` there first). Streamlit
+> only reads `.streamlit/config.toml` relative to the working directory, so
+> launching from elsewhere loses the theme and port settings.
+
+---
+
+## Pointing it at your data
+
+Everything lives in `config/config.yaml`. Two sections matter.
+
+### 1. Where the workbooks are
+
+```yaml
+data:
+  sources:
+    - name: "production"
+      path: "//fileserver/reports/daily"   # or Z:/Shared/Prod, or /Volumes/Reports
+      glob: "*.xlsx"
+      sheet: null        # null = first sheet · "Production" = by name · 0 = by index · "*" = all
+      header_row: 0      # 2 if there is a two-line title block above the headers
+      recursive: false
+```
+
+Every matching workbook is read and stacked into one table, so a folder of
+monthly exports behaves exactly like a single master file. Add as many sources
+as you like — a local folder and a share can coexist. Files Excel leaves behind
+while a workbook is open (`~$name.xlsx`) are skipped automatically.
+
+### 2. What the columns are called
+
+The dashboard does not care what your headers say, as long as you list them.
+Matching ignores case and extra whitespace, and the first alias present wins:
+
+```yaml
+data:
+  columns:
+    date: ["Date", "Effective Date", "Issue Date"]
+    premium: ["Premium", "Written Premium", "AP"]
+    agent: ["Agent", "Agent Name", "Producer"]
+    category: ["Category", "Product", "Line of Business"]
+    channel: ["Channel", "Source", "Lead Source"]
+    policy_id: ["Policy Number", "Policy #"]
+    count: ["Units", "Count"]        # optional; without it each row is one sale
+```
+
+Only `date` is required. Everything else falls back to a sensible default
+(premium 0, one sale per row, agent `Unassigned`) and is reported as unmapped.
+
+> **Open the Diagnostics page after any change.** It lists every workbook found,
+> every header in the sheet, exactly which canonical field each one resolved to,
+> and every row that was dropped. It is the fastest way to fix a mapping.
+
+### 3. The two reported categories
+
+```yaml
+data:
+  categories:
+    category_1:
+      label: "Life"                            # what the dashboard prints
+      values: ["Term Life", "Whole Life"]      # what the workbook contains
+    category_2:
+      label: "Medicare"
+      values: ["Medicare", "Supplement"]
+```
+
+Values matching neither list still count toward **Premium** and **Total Sales**
+but are bucketed as *Other*. Diagnostics lists them with row counts so nothing
+hides — if `Annuity` shows up there with 400 rows, you know to add it.
+
+### 4. Web sales
+
+```yaml
+data:
+  web_sales:
+    channel_values: ["Web", "Online", "Website"]
+    agent_values: ["Web Sales", "House Account"]
+```
+
+A row is a web sale when its **channel or its agent** matches. The
+**Include web sales** checkbox on the dashboard switches those rows in and out
+of every KPI, projection, table and export at once.
+
+---
+
+## What the dashboard shows
+
+### Four KPIs
+
+| KPI | What it counts |
+|---|---|
+| **Premium** | Sum of the premium column |
+| **Total Sales** | One per row, or the `count` column when mapped |
+| **Category 1 Sales** | Sales whose category matched `category_1` |
+| **Category 2 Sales** | Sales whose category matched `category_2` |
+
+### Five windows
+
+`Today` · `Yesterday` · `Rolling 7 days` · `Month to date` · `Year to date`
+
+Pick one at the top; the four cards, the trend chart and the breakdown all follow
+it. Each card carries a like-for-like comparison — today against yesterday,
+month-to-date against the same point last month, year-to-date against the same
+date last year. The **All periods** table shows every window at once, with the
+month-end and year-end projections as their own rows.
+
+### Projections
+
+```
+projected = actual to date ÷ working days elapsed × working days in the period
+```
+
+A working day is any day that is **not a Sunday** and **not an observed
+holiday**:
+
+```yaml
+calendar:
+  exclude_weekdays: ["Sunday"]
+  holidays:
+    observed: [new_years_day, memorial_day, independence_day,
+               labor_day, thanksgiving, christmas_day]
+    shift_to_next_working_day: true    # a Sunday holiday is observed on Monday
+    extra_dates: ["2026-12-24"]        # one-off closures
+    working_overrides: []              # force a day back to "open"
+```
+
+Holidays are computed, not listed, so the calendar stays correct in future years
+with no maintenance. Available observances: `new_years_day`, `mlk_day`,
+`presidents_day`, `good_friday`, `memorial_day`, `juneteenth`,
+`independence_day`, `labor_day`, `columbus_day`, `veterans_day`, `thanksgiving`,
+`day_after_thanksgiving`, `christmas_eve`, `christmas_day`, `new_years_eve`.
+
+`projection.count_today_as_elapsed: true` matches "total days ÷ days passed"
+literally. Set it to `false` to project off completed days only, which reads
+optimistic early in the day rather than pessimistic.
+
+The Diagnostics page prints the working-day count for the current month and
+year, the resolved holiday dates, and every non-working day in the next 30 days.
+
+### Refreshing
+
+**Refresh data** re-reads every workbook and stamps the page with the time it
+did. Between refreshes the data is cached, so switching periods is instant. The
+cache is also keyed to each file's modification time, so a replaced workbook is
+picked up on the next interaction even without pressing the button.
+
+### Breaking out by agent
+
+**Expand metrics by agent** opens a pivot: one row per agent, one column per KPI,
+sorted by premium, with a share-of-premium bar and a totals row that reconciles
+against the cards above. Switch the rows to **Category** or **Channel** with the
+group-by control, and export the current view as CSV.
+
+---
+
+## Admin panel
+
+Runs the Python scripts in another folder, in an order you set, with a human in
+the loop.
+
+**Point it anywhere.** `admin.scripts_dir` in `config.yaml` is the durable
+setting; the panel's *Scripts directory* box overrides it for this machine only
+(saved to `runtime/`, never committed).
+
+```yaml
+admin:
+  scripts_dir: "/home/ops/etl"    # or C:/Reporting/jobs
+  scripts_glob: "*.py"
+  working_dir: null               # null = each script's own folder
+  timeout_seconds: 3600
+  password_env: null              # set to gate the panel behind an env var
+  environment: {}                 # extra env vars for every script
+```
+
+**Set the order.** The run-order table takes an `Order` number, an `Enabled`
+box, a `Pause before` box and free-form `Arguments` per step. Renumber, save,
+and it persists in `runtime/pipeline.json`. Steps run lowest-number first and
+the pipeline stops on the first non-zero exit.
+
+**Answer prompts mid-script.** A script that calls `input()` halfway through
+stops and waits, exactly as it would in a terminal. The panel detects the prompt,
+shows it, and opens an answer box; what you send is written to the script's stdin
+and echoed into the transcript. Scripts run under a pseudo-terminal on macOS and
+Linux and under unbuffered pipes on Windows, so prompts appear before the answer
+either way.
+
+```python
+"""One-line description — the panel shows this next to the filename."""
+
+print("Preparing export...")
+if input("Publish to the shared drive? [y/N] ").strip().lower() not in {"y", "yes"}:
+    raise SystemExit("Cancelled by operator.")
+print("Published.")
+```
+
+`Pause before` is the other half: the run holds before that step until someone
+clicks **Continue**, which is the one to use before anything destructive.
+
+Every run is transcribed to `runtime/logs/run_<timestamp>.log`.
+
+**Same pipeline, real terminal** — for a scheduler, over SSH, or when nobody
+wants a browser in the loop:
+
+```bash
+python tools/run_pipeline.py           # the saved order
+python tools/run_pipeline.py --list    # show it without running
+python tools/run_pipeline.py --all     # every script, filename order
+python tools/run_pipeline.py --yes     # auto-approve the pause-before steps
+```
+
+---
+
+## Sharing it with the team
+
+`.streamlit/config.toml` binds to `0.0.0.0:8501`, so anyone on the same network
+can open `http://<the-machine's-ip>:8501` — including from a phone, which is
+what the mobile layout is for. To keep it to one machine, set
+`address = "localhost"`.
+
+For anything beyond a trusted LAN, put it behind your own reverse proxy and
+authentication. Streamlit has no built-in user accounts, and the optional
+`admin.password_env` gate protects only the Admin panel, not the data.
+
+---
+
+## Project layout
+
+```
+app/
+  main.py              Streamlit entrypoint and page navigation
+  settings.py          config.yaml -> typed dataclasses
+  paths.py             project-root anchoring for every relative path
+  core/
+    calendar_rules.py  working days, computed holidays
+    periods.py         today / yesterday / rolling 7 / MTD / YTD windows
+    kpis.py            the four KPIs and the pivot
+    projections.py     straight-line month and year projections
+  data/
+    schema.py          the canonical table every workbook becomes
+    excel_loader.py    discovery, column mapping, normalisation
+    repository.py      caching and the refresh button
+  ui/
+    theme.py           the stylesheet and number formatting
+    components.py      KPI cards, sections, console
+    charts.py          the daily trend chart
+  views/
+    dashboard.py       the Executive Dashboard page
+    admin.py           the Admin panel
+    diagnostics.py     "where did this number come from"
+  admin/
+    registry.py        script discovery and run-order persistence
+    runner.py          subprocess execution with interactive stdin
+config/                config.example.yaml (committed) + config.yaml (yours)
+scripts/               example pipeline scripts
+tools/                 sample-data generator, terminal pipeline runner
+tests/                 pytest suite
+runtime/               saved run order and run logs (git-ignored)
+```
+
+---
+
+## When a number looks wrong
+
+Open **Diagnostics** first. In order, it answers:
+
+1. **Which config file is in force** — the warning banner tells you if you are
+   still on the committed example.
+2. **Which workbooks were found**, how many rows each contributed, and how many
+   were dropped for an unreadable date.
+3. **How every column resolved** for a chosen sheet, plus the raw header list.
+4. **Which category values fell into "Other"**, with row counts.
+5. **How many rows counted as web sales**, broken down by channel.
+6. **What the working calendar thinks** — working days this month and year, the
+   resolved holidays, and the next 30 days' closures.
+7. **The first 50 rows** exactly as the app sees them.
+
+Common fixes:
+
+| Symptom | Cause |
+|---|---|
+| Everything is zero | `data.sources.path` does not resolve, or `header_row` is wrong |
+| Premium is zero but sales are right | The premium column alias is missing |
+| Category 1 and 2 are both zero | The workbook's category values are not in `values` |
+| Rows are missing | Their date cell is text Excel never parsed — see "Skipped (bad date)" |
+| A month projects too high | `count_today_as_elapsed: true` divides by a partial day |
+
+---
+
+## Tests
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest
+```
+
+The suite covers the working calendar (including holidays that fall on a
+Sunday), the period windows and their comparison ranges, KPI aggregation and the
+web-sales toggle, the projection maths, Excel ingestion against deliberately
+messy workbooks, the run-order store and its path guard, and the runner's
+prompt-and-answer path.

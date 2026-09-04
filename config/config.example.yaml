@@ -1,0 +1,163 @@
+# =============================================================================
+# Executive Dashboard -- configuration
+# -----------------------------------------------------------------------------
+# Copy this file to config/config.yaml and edit it for the machine you are on.
+# config/config.yaml is git-ignored, so every workstation keeps its own paths
+# and nothing local ever lands in the repository.
+#
+#   cp config/config.example.yaml config/config.yaml
+#
+# If config/config.yaml is missing the app falls back to this file, so a fresh
+# clone runs immediately against the generated sample workbooks.
+# =============================================================================
+
+app:
+  title: "Executive Dashboard"
+  organization: "Moar Lyfe"
+  # IANA timezone that defines "today". Everything -- period boundaries,
+  # working-day counts, projections -- is anchored to this zone.
+  timezone: "America/New_York"
+  # Currency prefix used when rendering premium figures.
+  currency_symbol: "$"
+
+# -----------------------------------------------------------------------------
+# WHERE THE DATA COMES FROM
+# -----------------------------------------------------------------------------
+# Each source is a folder plus a glob. Relative paths resolve against the
+# project root, so a network share is just an absolute path:
+#
+#   - path: "//fileserver/reports/daily"      (Windows UNC)
+#   - path: "/Volumes/Reports/daily"          (macOS)
+#   - path: "Z:/Shared/Production"            (mapped drive)
+#
+# Every matching workbook is read and stacked into one table, so a folder of
+# monthly exports works exactly like a single master file.
+# -----------------------------------------------------------------------------
+data:
+  sources:
+    - name: "sample"
+      path: "data/sample"
+      glob: "*.xlsx"
+      # Sheet to read: a name ("Production"), a zero-based index (0),
+      # null for the first sheet, or "*" for every sheet in the workbook.
+      sheet: null
+      # Zero-based row that holds the column headers (2 if the export has a
+      # two-line title block above the header row).
+      header_row: 0
+      recursive: false
+
+  # ---------------------------------------------------------------------------
+  # COLUMN MAPPING
+  # ---------------------------------------------------------------------------
+  # Maps the dashboard's canonical fields onto whatever the workbook calls
+  # them. Matching is case-insensitive and ignores extra whitespace, so
+  # "Written  Premium" matches "written premium". List as many aliases as you
+  # need -- the first one present in a sheet wins. Add your real headers here;
+  # the Diagnostics page shows exactly what resolved and what did not.
+  # ---------------------------------------------------------------------------
+  columns:
+    date: ["Date", "Sale Date", "Effective Date", "Issue Date", "Submitted"]
+    premium: ["Premium", "Written Premium", "Annual Premium", "AP", "Amount"]
+    agent: ["Agent", "Agent Name", "Producer", "Writing Agent", "Rep"]
+    category: ["Category", "Product", "Product Type", "Line", "Line of Business"]
+    channel: ["Channel", "Source", "Lead Source", "Origin"]
+    policy_id: ["Policy", "Policy Number", "Policy #", "App ID", "Application"]
+    # Optional. When present each row contributes this many sales instead of 1.
+    count: ["Units", "Count", "Items", "Policies"]
+
+  # ---------------------------------------------------------------------------
+  # THE TWO REPORTED CATEGORIES
+  # ---------------------------------------------------------------------------
+  # `label` is what the dashboard prints. `values` are the raw strings found in
+  # the category column, matched case-insensitively. Anything that matches
+  # neither list still counts toward Total Sales and Premium but is bucketed as
+  # "Other" -- Diagnostics lists unmatched values so nothing hides.
+  # ---------------------------------------------------------------------------
+  categories:
+    category_1:
+      label: "Category 1"
+      values: ["Category 1", "Cat 1", "Life", "Term Life", "Whole Life"]
+    category_2:
+      label: "Category 2"
+      values: ["Category 2", "Cat 2", "Health", "Medicare", "Supplement"]
+    other_label: "Other"
+
+  # ---------------------------------------------------------------------------
+  # WEB SALES
+  # ---------------------------------------------------------------------------
+  # A row is a web sale when its channel OR its agent matches one of these.
+  # The "Include web sales" toggle on the dashboard switches these rows in and
+  # out of every KPI, table and projection.
+  # ---------------------------------------------------------------------------
+  web_sales:
+    channel_values: ["Web", "Online", "Website", "Internet", "Direct Web"]
+    agent_values: ["WEB", "Web Sales", "House", "House Account"]
+
+  # Drop repeated rows when the same workbook is exported twice. Disabled by
+  # default so nothing disappears silently.
+  dedupe:
+    enabled: false
+    keys: ["policy_id", "date"]
+
+# -----------------------------------------------------------------------------
+# WORKING CALENDAR -- drives every projection
+# -----------------------------------------------------------------------------
+calendar:
+  # Weekdays that are never working days.
+  exclude_weekdays: ["Sunday"]
+
+  holidays:
+    # Enabled observances. Available keys:
+    #   new_years_day, mlk_day, presidents_day, good_friday, memorial_day,
+    #   juneteenth, independence_day, labor_day, columbus_day, veterans_day,
+    #   thanksgiving, day_after_thanksgiving, christmas_eve, christmas_day,
+    #   new_years_eve
+    observed:
+      - new_years_day
+      - memorial_day
+      - independence_day
+      - labor_day
+      - thanksgiving
+      - christmas_day
+    # A holiday landing on an already-excluded day (e.g. Sunday) would cost
+    # nothing, so shift it to the next working day instead.
+    shift_to_next_working_day: true
+    # One-off closures: office days, storm days, anything else.
+    extra_dates: []
+    # Force a date to count as a working day even if a rule above excluded it.
+    working_overrides: []
+
+# -----------------------------------------------------------------------------
+# PROJECTIONS
+# -----------------------------------------------------------------------------
+# projected = actual_to_date / working_days_elapsed * working_days_in_period
+projection:
+  enabled: true
+  # Count today as an elapsed working day. true matches "total days divided by
+  # days passed" literally; false projects off completed days only, which runs
+  # optimistic early in the morning instead of pessimistic.
+  count_today_as_elapsed: true
+  # Periods that get a projection. Daily/rolling windows have no meaningful
+  # end state, so only month and year are projected.
+  periods: ["month", "year"]
+
+# -----------------------------------------------------------------------------
+# ADMIN PANEL
+# -----------------------------------------------------------------------------
+admin:
+  enabled: true
+  # Folder holding the Python scripts the panel can run. Point this anywhere:
+  #   scripts_dir: "/home/ops/etl"
+  #   scripts_dir: "C:/Reporting/jobs"
+  scripts_dir: "scripts"
+  scripts_glob: "*.py"
+  recursive: false
+  # Working directory for each run. null = the script's own folder.
+  working_dir: null
+  # Hard stop for a single script, in seconds.
+  timeout_seconds: 3600
+  # Optional gate. When set, the panel asks for the value held in this
+  # environment variable. Leave null for no password.
+  password_env: null
+  # Extra environment variables handed to every script.
+  environment: {}
