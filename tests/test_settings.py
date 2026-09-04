@@ -73,3 +73,103 @@ def test_category_labels_default_when_absent(tmp_path):
     settings = load_settings(write(tmp_path, "app:\n  title: Test\n"))
     assert settings.data.category_1.label == "Category 1"
     assert settings.data.category_2.label == "Category 2"
+
+
+# --------------------------------------------------------------------------- #
+# Analytics
+# --------------------------------------------------------------------------- #
+
+
+def test_analytics_defaults_are_usable_without_configuration(tmp_path):
+    settings = load_settings(write(tmp_path, "app:\n  title: Test\n"))
+    assert settings.analytics.enabled is True
+    assert settings.analytics.windows == (15, 30, 45, 90)
+    assert settings.analytics.basis == "working_days"
+    assert settings.analytics.preset == "standard"
+
+
+def test_a_rule_with_no_thresholds_cannot_fire_so_it_is_rejected(tmp_path):
+    settings = load_settings(
+        write(
+            tmp_path,
+            "analytics:\n"
+            "  rules:\n"
+            "    - name: Silent\n"
+            "      metric: premium\n"
+            "      kind: relative\n"
+            "      window: 15\n",
+        )
+    )
+    assert settings.analytics.rules == ()
+    assert any("needs 'warn_pct' or 'critical_pct'" in w for w in settings.warnings)
+
+
+def test_unknown_metrics_and_kinds_are_dropped_with_a_warning(tmp_path):
+    settings = load_settings(
+        write(
+            tmp_path,
+            "analytics:\n"
+            "  rules:\n"
+            "    - metric: profit\n"
+            "      kind: relative\n"
+            "      warn_pct: 10\n"
+            "    - metric: premium\n"
+            "      kind: telepathy\n"
+            "      warn_pct: 10\n",
+        )
+    )
+    assert settings.analytics.rules == ()
+    assert any("is not one of" in w for w in settings.warnings)
+    assert any("unknown kind" in w for w in settings.warnings)
+
+
+def test_a_baseline_shorter_than_its_window_is_rejected(tmp_path):
+    """Judging 30 days against 15 would compare a window with part of itself."""
+    settings = load_settings(
+        write(
+            tmp_path,
+            "analytics:\n"
+            "  rules:\n"
+            "    - metric: premium\n"
+            "      kind: relative\n"
+            "      window: 30\n"
+            "      baseline: 15\n"
+            "      warn_pct: 10\n",
+        )
+    )
+    assert settings.analytics.rules == ()
+    assert any("must be longer than window" in w for w in settings.warnings)
+
+
+def test_a_valid_rule_survives_intact(tmp_path):
+    settings = load_settings(
+        write(
+            tmp_path,
+            "analytics:\n"
+            "  windows: [10, 20]\n"
+            "  basis: calendar_days\n"
+            "  rules:\n"
+            "    - name: Premium floor\n"
+            "      metric: premium\n"
+            "      kind: threshold\n"
+            "      window: 30\n"
+            "      operator: min\n"
+            "      warn: 2500\n"
+            "      critical: 2000\n",
+        )
+    )
+    # The stub config warns about having no data sources; nothing about analytics.
+    assert not [w for w in settings.warnings if "analytics" in w]
+    assert settings.analytics.windows == (10, 20)
+    assert settings.analytics.basis == "calendar_days"
+
+    rule = settings.analytics.rules[0]
+    assert rule.name == "Premium floor"
+    assert rule.is_threshold
+    assert (rule.warn, rule.critical) == (2500.0, 2000.0)
+
+
+def test_an_unknown_basis_falls_back_with_a_warning(tmp_path):
+    settings = load_settings(write(tmp_path, "analytics:\n  basis: lunar_cycles\n"))
+    assert settings.analytics.basis == "working_days"
+    assert any("analytics.basis" in w for w in settings.warnings)

@@ -108,6 +108,59 @@ class ProjectionSettings:
 
 
 @dataclass(frozen=True)
+class AlertRuleSettings:
+    """One monitoring rule.
+
+    Three kinds, covering the two ways a metric can be judged:
+
+    * ``threshold`` -- **defined**. You state the number the moving average must
+      hold (a floor, or a ceiling).
+    * ``relative`` -- **undefined**. No number needed: the short window is
+      judged against the metric's own longer baseline, so the rule calibrates
+      itself and keeps working as the business grows.
+    * ``trend`` -- the same window compared with where it stood N days ago,
+      which catches a slide that a stable baseline would mask.
+    """
+
+    name: str
+    metric: str                       # premium | sales | category_1 | category_2
+    kind: str = "relative"            # threshold | relative | trend
+    window: int = 15
+    baseline: int = 90                # relative: the longer window to judge against
+    lookback_days: int = 30           # trend: how far back to compare
+    operator: str = "min"             # threshold: min = floor, max = ceiling
+    warn: float | None = None         # threshold: per-day value
+    critical: float | None = None
+    warn_pct: float | None = None     # relative/trend: shortfall that warns
+    critical_pct: float | None = None
+    enabled: bool = True
+
+    @property
+    def is_threshold(self) -> bool:
+        return self.kind == "threshold"
+
+
+@dataclass(frozen=True)
+class AnalyticsSettings:
+    enabled: bool = True
+    # Moving-average windows offered on the page, in days.
+    windows: tuple[int, ...] = (15, 30, 45, 90)
+    # working_days divides by days the business is actually open, so a window
+    # holding three Sundays is not penalised against one holding two.
+    basis: str = "working_days"
+    default_baseline: int = 90
+    # A window shorter than this much history is reported as "not enough data"
+    # rather than quietly averaging over a partial window.
+    min_history_days: int = 30
+    monitor_agents: bool = True
+    # Agents below this many sales in the baseline window are too small for a
+    # percentage swing to mean anything.
+    agent_min_sales: float = 5.0
+    preset: str = "standard"
+    rules: tuple[AlertRuleSettings, ...] = ()
+
+
+@dataclass(frozen=True)
 class AdminSettings:
     enabled: bool = True
     scripts_dir: str = "scripts"
@@ -135,6 +188,7 @@ class Settings:
     data: DataSettings
     calendar: CalendarSettings
     projection: ProjectionSettings
+    analytics: AnalyticsSettings
     admin: AdminSettings
     source_file: Path
     warnings: tuple[str, ...] = ()
@@ -176,6 +230,117 @@ def _parse_category(raw: Any, key: str, default_label: str) -> CategorySettings:
         key=key,
         label=str(raw.get("label") or default_label),
         values=_as_str_tuple(raw.get("values")),
+    )
+
+
+VALID_RULE_KINDS = ("threshold", "relative", "trend")
+VALID_METRICS = ("premium", "sales", "category_1", "category_2")
+VALID_BASES = ("working_days", "calendar_days")
+
+
+def _as_float(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_rule(raw: Any, index: int, warnings: list[str]) -> AlertRuleSettings | None:
+    """One entry of ``analytics.rules``; ``None`` when it cannot be honoured."""
+    label = f"analytics.rules[{index}]"
+    if not isinstance(raw, dict):
+        warnings.append(f"{label} is not a mapping; ignored.")
+        return None
+
+    metric = str(raw.get("metric") or "").strip()
+    if metric not in VALID_METRICS:
+        warnings.append(
+            f"{label}: metric {metric or '(missing)'!r} is not one of "
+            f"{', '.join(VALID_METRICS)}; rule ignored."
+        )
+        return None
+
+    kind = str(raw.get("kind") or "relative").strip().lower()
+    if kind not in VALID_RULE_KINDS:
+        warnings.append(f"{label}: unknown kind {kind!r}; rule ignored.")
+        return None
+
+    operator = str(raw.get("operator") or "min").strip().lower()
+    if operator not in ("min", "max"):
+        warnings.append(f"{label}: operator must be min or max; using min.")
+        operator = "min"
+
+    rule = AlertRuleSettings(
+        name=str(raw.get("name") or f"{metric} {kind}"),
+        metric=metric,
+        kind=kind,
+        window=_as_int(raw.get("window"), 15),
+        baseline=_as_int(raw.get("baseline"), 90),
+        lookback_days=_as_int(raw.get("lookback_days"), 30),
+        operator=operator,
+        warn=_as_float(raw.get("warn")),
+        critical=_as_float(raw.get("critical")),
+        warn_pct=_as_float(raw.get("warn_pct")),
+        critical_pct=_as_float(raw.get("critical_pct")),
+        enabled=bool(raw.get("enabled", True)),
+    )
+
+    # A rule that cannot fire is a configuration mistake, not a silent no-op.
+    if rule.is_threshold and rule.warn is None and rule.critical is None:
+        warnings.append(f"{label}: a threshold rule needs 'warn' or 'critical'; ignored.")
+        return None
+    if not rule.is_threshold and rule.warn_pct is None and rule.critical_pct is None:
+        warnings.append(
+            f"{label}: a {kind} rule needs 'warn_pct' or 'critical_pct'; ignored."
+        )
+        return None
+    if rule.window < 1:
+        warnings.append(f"{label}: window must be at least 1 day; ignored.")
+        return None
+    if rule.kind == "relative" and rule.baseline <= rule.window:
+        warnings.append(
+            f"{label}: baseline ({rule.baseline}d) must be longer than window "
+            f"({rule.window}d); ignored."
+        )
+        return None
+    return rule
+
+
+def _parse_analytics(raw: dict[str, Any], warnings: list[str]) -> AnalyticsSettings:
+    defaults = AnalyticsSettings()
+
+    windows = tuple(
+        w for w in (_as_int(v, 0) for v in (raw.get("windows") or ())) if w > 0
+    )
+    if raw.get("windows") and not windows:
+        warnings.append("analytics.windows held no positive integers; using defaults.")
+
+    basis = str(raw.get("basis") or defaults.basis).strip().lower()
+    if basis not in VALID_BASES:
+        warnings.append(
+            f"analytics.basis {basis!r} is not one of {', '.join(VALID_BASES)}; "
+            "using working_days."
+        )
+        basis = defaults.basis
+
+    rules: list[AlertRuleSettings] = []
+    for index, item in enumerate(raw.get("rules") or []):
+        rule = _parse_rule(item, index, warnings)
+        if rule is not None:
+            rules.append(rule)
+
+    return AnalyticsSettings(
+        enabled=bool(raw.get("enabled", defaults.enabled)),
+        windows=tuple(sorted(set(windows))) or defaults.windows,
+        basis=basis,
+        default_baseline=_as_int(raw.get("default_baseline"), defaults.default_baseline),
+        min_history_days=_as_int(raw.get("min_history_days"), defaults.min_history_days),
+        monitor_agents=bool(raw.get("monitor_agents", defaults.monitor_agents)),
+        agent_min_sales=_as_float(raw.get("agent_min_sales")) or defaults.agent_min_sales,
+        preset=str(raw.get("preset") or defaults.preset).strip().lower(),
+        rules=tuple(rules),
     )
 
 
@@ -271,6 +436,8 @@ def _parse(raw: dict[str, Any], source_file: Path) -> Settings:
         periods=_as_str_tuple(proj_raw.get("periods")) or ("month", "year"),
     )
 
+    analytics = _parse_analytics(raw.get("analytics") or {}, warnings)
+
     admin_raw = raw.get("admin") or {}
     environment = {
         str(k): str(v) for k, v in (admin_raw.get("environment") or {}).items()
@@ -295,6 +462,7 @@ def _parse(raw: dict[str, Any], source_file: Path) -> Settings:
         data=data,
         calendar=calendar,
         projection=projection,
+        analytics=analytics,
         admin=admin,
         source_file=source_file,
         warnings=tuple(warnings),
@@ -325,6 +493,7 @@ def load_settings(path: Path | None = None) -> Settings:
             data=settings.data,
             calendar=settings.calendar,
             projection=settings.projection,
+            analytics=settings.analytics,
             admin=settings.admin,
             source_file=target,
             warnings=(f"Could not parse {target.name}: {exc}",) + settings.warnings,

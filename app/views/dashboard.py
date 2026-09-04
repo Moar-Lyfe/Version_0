@@ -17,7 +17,7 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 
-from app.core import kpis, projections
+from app.core import analytics, kpis, projections
 from app.core.calendar_rules import WorkingCalendar
 from app.core.periods import MONTH, PERIOD_ORDER, build_periods
 from app.data import repository
@@ -25,7 +25,7 @@ from app.data import schema as S
 from app.settings import Settings
 from app.ui import charts, components
 from app.ui.components import Card
-from app.ui.theme import delta_parts, format_projection, format_value
+from app.ui.theme import STATUS, delta_parts, format_projection, format_value
 from app.views import widgets
 
 GROUP_COLUMNS = {
@@ -241,6 +241,47 @@ def _breakdown(settings: Settings, frame: pd.DataFrame, period) -> None:
 # --------------------------------------------------------------------------- #
 
 
+def _alert_banner(settings: Settings, frame: pd.DataFrame, today: date) -> None:
+    """One line saying whether anything on the Analytics page needs attention.
+
+    Only the book-wide rules are evaluated here -- the per-agent sweep is the
+    Analytics page's job and costs more than a dashboard rerun should.
+    """
+    if not settings.analytics.enabled:
+        return
+
+    calendar = WorkingCalendar.from_settings(settings.calendar)
+    context = analytics.build_context(
+        frame, settings.analytics, settings.data, calendar, today
+    )
+    alerts = [a for a in analytics.evaluate(context) if a.severity.is_alert]
+    if not alerts:
+        return
+
+    worst = alerts[0].severity
+    critical = sum(1 for a in alerts if a.severity is analytics.Severity.CRITICAL)
+    warning = len(alerts) - critical
+    parts = []
+    if critical:
+        parts.append(f"{critical} critical")
+    if warning:
+        parts.append(f"{warning} warning")
+
+    # Plain text only: the card escapes its content, so markdown would show
+    # up as literal asterisks.
+    tail = (
+        f" (+{len(alerts) - 1} more — see the Analytics page.)"
+        if len(alerts) > 1
+        else " See the Analytics page for the detail."
+    )
+    components.alert_card(
+        f"{' and '.join(parts)} on moving averages",
+        alerts[0].message + tail,
+        worst.label,
+        STATUS.get(worst.value, STATUS["no_data"]),
+    )
+
+
 def render(settings: Settings) -> None:
     result = repository.get_dataset(settings)
     today = settings.app.today()
@@ -271,6 +312,8 @@ def render(settings: Settings) -> None:
         return
 
     frame = kpis.apply_web_filter(result.frame, include_web)
+
+    _alert_banner(settings, frame, today)
 
     period_key = widgets.choice(
         "Reporting period",

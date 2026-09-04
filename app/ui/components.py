@@ -102,17 +102,72 @@ def console(text: str, placeholder: str = "No output yet.") -> None:
     )
 
 
+def alert_card(
+    title: str,
+    message: str,
+    severity_label: str,
+    color: str,
+    scope: str = "",
+) -> None:
+    """One alert.
+
+    The severity is written out as well as coloured -- ``warning`` sits below
+    3:1 contrast on a light surface by design, so the dot is an echo of the
+    label, never the thing carrying the meaning.
+
+    All content is HTML-escaped, so pass plain text: markdown would render as
+    literal asterisks.
+    """
+    scope_html = (
+        f'<span class="ed-alert-scope">{escape(scope)}</span>' if scope else ""
+    )
+    st.markdown(
+        f'<div class="ed-alert" style="border-left-color:{color}">'
+        f'<span class="ed-dot" style="background:{color}"></span>'
+        f'<div class="ed-alert-body">'
+        f'<div class="ed-alert-head">'
+        f'<span class="ed-alert-sev" style="color:{color}">{escape(severity_label)}</span>'
+        f'<span class="ed-alert-title">{escape(title)}</span>{scope_html}'
+        f"</div>"
+        f'<div class="ed-alert-msg">{escape(message)}</div>'
+        f"</div></div>",
+        unsafe_allow_html=True,
+    )
+
+
+def series_chips(items: list[tuple[str, str, str]]) -> None:
+    """Direct labels for a multi-series chart: ``(name, value, colour)``.
+
+    Placed beside the plot rather than inside it: four line-ends converging on
+    the right edge collide, and a chip carries the current value too, which is
+    the number people came for.
+    """
+    if not items:
+        return
+    chips = "".join(
+        f'<span class="ed-chip">'
+        f'<span class="ed-swatch" style="background:{color}"></span>'
+        f'<span class="ed-chip-name">{escape(name)}</span>'
+        f'<span class="ed-chip-value">{escape(value)}</span>'
+        f"</span>"
+        for name, value, color in items
+    )
+    st.markdown(f'<div class="ed-chips">{chips}</div>', unsafe_allow_html=True)
+
+
 def empty_state(title: str, body: str) -> None:
     st.info(f"**{title}**\n\n{body}")
 
 
 __all__ = [
     "Card",
+    "alert_card",
     "console",
     "empty_state",
     "kpi_grid",
     "masthead",
     "meta_strip",
     "section",
+    "series_chips",
     "subhead",
 ]

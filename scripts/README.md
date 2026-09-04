@@ -39,3 +39,20 @@ Run the same pipeline from a real terminal instead:
 ```bash
 python tools/run_pipeline.py
 ```
+
+## A ready-made step: the alert check
+
+`tools/check_alerts.py` evaluates the Analytics rules and exits non-zero on a
+breach, which makes it a useful last step in a nightly pipeline — the run fails
+loudly when a metric is slipping:
+
+```yaml
+admin:
+  scripts_dir: "scripts"
+```
+
+Add it to the run order like any other script, or call it directly:
+
+```bash
+python tools/check_alerts.py --quiet        # exit 1 on warning, 2 on critical
+```

@@ -5,6 +5,10 @@ Streamlit. It reads Excel workbooks straight off disk or a network share, shows
 four KPIs across five reporting windows, projects the month and the year off a
 working-day calendar, and breaks any period out by agent.
 
+An **Analytics** page tracks every KPI on 15/30/45/90-day moving averages and
+raises an alert when one slips — against a number you set, or against the
+metric's own history when nobody has set one.
+
 It also ships an **Admin** panel that runs your other Python scripts in a
 configurable order and lets you answer their terminal prompts from the browser.
 
@@ -208,6 +212,107 @@ group-by control, and export the current view as CSV.
 
 ---
 
+## Analytics — moving averages and alerting
+
+The Dashboard reports the current period. The **Analytics** page watches the
+*shape* of each KPI over trailing **15, 30, 45 and 90-day** windows and says
+plainly when one is slipping. A summary banner appears on the Dashboard when
+anything is wrong, so nobody has to go looking.
+
+**Averages are per working day.** A window holding three Sundays is not
+penalised against one holding two, and a window containing a holiday is not read
+as a slowdown. That is the same calendar the projections use, so the two
+features can never disagree about what a day is worth. Set
+`analytics.basis: calendar_days` if you would rather divide by raw days.
+
+### Three kinds of rule
+
+| Kind | You supply | What it does |
+|---|---|---|
+| `threshold` | a number | **Defined.** The average must hold a floor (or stay under a ceiling) |
+| `relative` | a percentage | **Undefined.** The short window is judged against the metric's *own* longer baseline |
+| `trend` | a percentage | The same window against where it stood N days ago |
+
+`relative` is the one to reach for by default. It needs no targets, so it works
+on a metric nobody has set a goal for, and it keeps working as the business
+grows — the bar moves with the book instead of going stale.
+
+```yaml
+analytics:
+  windows: [15, 30, 45, 90]
+  rules:
+    - name: "Premium vs 90-day baseline"     # undefined: no target needed
+      metric: premium
+      kind: relative
+      window: 15
+      baseline: 90
+      warn_pct: 10                            # 15-day 10% under the 90-day
+      critical_pct: 20
+
+    - name: "Category 1 daily floor"          # defined: a real floor
+      metric: category_1
+      kind: threshold
+      window: 30
+      operator: min
+      warn: 2.0                               # sales per working day
+      critical: 1.5
+```
+
+### Or just use a preset
+
+Leave `rules: []` and a preset runs instead — no targets, no setup:
+
+| Preset | Watches |
+|---|---|
+| `standard` *(default)* | All four KPIs against their own 90-day baseline |
+| `sensitive` | Tighter tolerances, extra windows, plus a 45-day trend rule |
+| `minimal` | Premium only |
+| `none` | No rules; the page still charts the averages |
+
+### What the page shows
+
+- **Alerts** — one card per breach, worst first, each written out in plain
+  English with the actual numbers. Severity is always written as well as
+  coloured, so colour never carries the meaning alone.
+- **Moving averages** — every window overlaid for the chosen metric, with a
+  shared crosshair. This is where a 15-day line pulling away from the 90-day
+  becomes obvious. A threshold rule is drawn as a reference line.
+- **Agents to watch** — the same self-calibrating rules applied one agent at a
+  time, listing only those slipping. Thresholds are deliberately *not* applied
+  per agent: a floor written for the whole book says nothing about one person.
+  Agents below `agent_min_sales` are skipped, because a percentage swing on
+  three sales is noise.
+- **Rules** — exactly what is doing the judging, and whether it came from your
+  config or a preset.
+
+### "Not enough data" is a real answer
+
+A 90-day baseline needs 90 days. Rather than average over whatever exists and
+report a confident, wrong number, an unanswerable rule says so — including for
+an agent who started last month. The same applies to a zero baseline, where a
+percentage comparison means nothing.
+
+### Alerting outside the browser
+
+`tools/check_alerts.py` runs the same rules from a terminal and exits non-zero
+on a breach, so a scheduler or the Admin pipeline can act on it:
+
+```bash
+python tools/check_alerts.py                 # book-wide + per agent
+python tools/check_alerts.py --quiet         # only what is wrong
+python tools/check_alerts.py --json          # machine-readable
+python tools/check_alerts.py --csv out.csv
+```
+
+| Exit code | Meaning |
+|---|---|
+| 0 | Nothing above the warning line |
+| 1 | At least one warning |
+| 2 | At least one critical |
+| 3 | Could not evaluate — no data, or not enough history |
+
+---
+
 ## Admin panel
 
 Runs the Python scripts in another folder, in an order you set, with a human in
@@ -307,6 +412,7 @@ app/
     periods.py         today / yesterday / rolling 7 / MTD / YTD windows
     kpis.py            the four KPIs and the pivot
     projections.py     straight-line month and year projections
+    analytics.py       moving averages, alert rules, presets
   data/
     schema.py          the canonical table every workbook becomes
     excel_loader.py    discovery, column mapping, normalisation
@@ -317,6 +423,7 @@ app/
     charts.py          the daily trend chart
   views/
     dashboard.py       the Executive Dashboard page
+    analytics.py       moving-average monitoring and alerts
     admin.py           the Admin panel
     diagnostics.py     "where did this number come from"
   admin/
@@ -326,7 +433,7 @@ config/                config.example.yaml (committed) + config.yaml (yours)
 deploy/                systemd unit for running it as a service
 docs/                  deployment.md -- LAN setup, firewall, autostart
 scripts/               example pipeline scripts
-tools/                 sample-data generator, terminal pipeline runner
+tools/                 sample-data generator, pipeline runner, alert checker
 tests/                 pytest suite
 runtime/               saved run order and run logs (git-ignored)
 ```
@@ -369,6 +476,7 @@ python -m pytest
 
 The suite covers the working calendar (including holidays that fall on a
 Sunday), the period windows and their comparison ranges, KPI aggregation and the
-web-sales toggle, the projection maths, Excel ingestion against deliberately
-messy workbooks, the run-order store and its path guard, and the runner's
-prompt-and-answer path.
+web-sales toggle, the projection maths, moving averages and every alert rule
+(including the cases that must report "not enough data" rather than a number),
+Excel ingestion against deliberately messy workbooks, the run-order store and
+its path guard, and the runner's prompt-and-answer path.

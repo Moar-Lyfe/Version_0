@@ -142,6 +142,94 @@ projection:
   periods: ["month", "year"]
 
 # -----------------------------------------------------------------------------
+# ANALYTICS -- moving averages and alerting
+# -----------------------------------------------------------------------------
+# Watches each KPI as a trailing moving average and raises an alert when one
+# slips. Averages are per WORKING day, so a window holding three Sundays is not
+# penalised against one holding two.
+# -----------------------------------------------------------------------------
+analytics:
+  enabled: true
+  # Windows offered on the Analytics page, in days. Any window a rule names is
+  # computed whether or not it is listed here.
+  windows: [15, 30, 45, 90]
+  # working_days (recommended) or calendar_days.
+  basis: "working_days"
+  # A rule reports "not enough data" below this much history rather than
+  # averaging over a partial window.
+  min_history_days: 30
+  # Also judge each agent against their own baseline.
+  monitor_agents: true
+  # Agents below this many sales in the baseline window are too small for a
+  # percentage swing to mean anything.
+  agent_min_sales: 5
+
+  # ---------------------------------------------------------------------------
+  # PRESETS
+  # ---------------------------------------------------------------------------
+  # Used when `rules` below is empty. A preset needs no targets: every metric is
+  # judged against its own history, so it works on day one.
+  #   standard  -- premium and sales at 15d vs 90d, categories at 30d vs 90d
+  #   sensitive -- tighter tolerances, extra windows, plus a 45-day trend rule
+  #   minimal   -- premium only, quiet
+  #   none      -- no rules; the page still charts the averages
+  preset: "standard"
+
+  # ---------------------------------------------------------------------------
+  # RULES -- anything here replaces the preset entirely
+  # ---------------------------------------------------------------------------
+  # Three kinds, covering both ways a metric can be judged:
+  #
+  #   kind: threshold   DEFINED. You state the number the average must hold.
+  #                     Needs `operator` (min = floor, max = ceiling) and
+  #                     `warn` / `critical` as PER-WORKING-DAY values.
+  #
+  #   kind: relative    UNDEFINED. No number needed -- the short window is
+  #                     judged against the metric's own longer `baseline`, so
+  #                     the rule calibrates itself and survives growth.
+  #                     Needs `warn_pct` / `critical_pct` (shortfall %).
+  #
+  #   kind: trend       The same window against where it stood
+  #                     `lookback_days` ago -- catches a slide that a stable
+  #                     baseline would hide. Needs `warn_pct` / `critical_pct`.
+  #
+  # metric is one of: premium, sales, category_1, category_2
+  rules: []
+  # Worked examples -- uncomment and edit:
+  #
+  # rules:
+  #   - name: "Premium vs 90-day baseline"
+  #     metric: premium
+  #     kind: relative
+  #     window: 15
+  #     baseline: 90
+  #     warn_pct: 10          # 15-day average 10% below the 90-day baseline
+  #     critical_pct: 20
+  #
+  #   - name: "Category 1 daily floor"
+  #     metric: category_1
+  #     kind: threshold
+  #     window: 30
+  #     operator: min
+  #     warn: 2.0             # fewer than 2 sales per working day
+  #     critical: 1.5
+  #
+  #   - name: "Premium slide since last month"
+  #     metric: premium
+  #     kind: trend
+  #     window: 30
+  #     lookback_days: 30
+  #     warn_pct: 8
+  #     critical_pct: 15
+  #
+  #   - name: "Retired rule"
+  #     metric: sales
+  #     kind: relative
+  #     window: 15
+  #     warn_pct: 10
+  #     enabled: false        # kept on file, never evaluated
+
+# -----------------------------------------------------------------------------
 # ADMIN PANEL
 # -----------------------------------------------------------------------------
 admin:

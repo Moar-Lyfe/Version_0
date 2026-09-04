@@ -23,6 +23,18 @@ POSITIVE = "#12805c"
 NEGATIVE = "#c0392b"
 NEUTRAL = "rgba(128, 128, 128, 0.85)"
 
+# Reserved status palette -- never reused as a series colour. Warning and
+# serious sit below 3:1 on a light surface by design, so a status colour is
+# always paired with a dot *and* a written label; it never carries meaning
+# alone.
+STATUS = {
+    "ok": "#0ca30c",
+    "warning": "#fab219",
+    "serious": "#ec835a",
+    "critical": "#d03b3b",
+    "no_data": "rgba(128, 128, 128, 0.75)",
+}
+
 _CSS = (
     """
 <style>
@@ -240,6 +252,82 @@ div[data-testid="stExpander"] details {
   border-radius: var(--ed-radius);
   background: transparent;
 }
+
+/* ---------- Alerts ---------- */
+.ed-alert {
+  display: flex;
+  gap: 0.6rem;
+  align-items: flex-start;
+  border: 1px solid var(--ed-line);
+  border-left-width: 3px;
+  border-radius: var(--ed-radius);
+  background: var(--ed-surface);
+  padding: 0.7rem 0.85rem;
+  margin-bottom: 0.5rem;
+}
+.ed-alert .ed-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+  margin-top: 0.4rem;
+}
+.ed-alert .ed-alert-body { min-width: 0; flex: 1 1 auto; }
+.ed-alert .ed-alert-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.3rem 0.6rem;
+  margin-bottom: 0.15rem;
+}
+.ed-alert .ed-alert-title { font-weight: 620; font-size: 0.88rem; }
+/* The written severity is what carries the meaning; the colour only echoes it. */
+.ed-alert .ed-alert-sev {
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.ed-alert .ed-alert-scope {
+  font-size: 0.72rem;
+  color: var(--ed-muted);
+  border: 1px solid var(--ed-line);
+  border-radius: 999px;
+  padding: 0.02rem 0.45rem;
+}
+.ed-alert .ed-alert-msg {
+  font-size: 0.82rem;
+  color: var(--ed-muted);
+  line-height: 1.45;
+}
+
+/* ---------- Series legend chips (direct labels for the MA chart) ---------- */
+.ed-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.55rem;
+  margin: 0.1rem 0 0.5rem 0;
+}
+.ed-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  border: 1px solid var(--ed-line);
+  border-radius: 999px;
+  padding: 0.12rem 0.6rem;
+  font-size: 0.76rem;
+  font-variant-numeric: tabular-nums;
+  min-width: 0;
+}
+.ed-chip .ed-swatch {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  align-self: center;
+  flex: 0 0 auto;
+}
+.ed-chip .ed-chip-name { color: var(--ed-muted); }
+.ed-chip .ed-chip-value { font-weight: 620; }
 
 /* Terminal-style transcript for the admin script runner. */
 .ed-console {

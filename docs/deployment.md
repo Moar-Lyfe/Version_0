@@ -157,6 +157,33 @@ chrome, which is what the mobile layout was built for.
 
 ---
 
+## Scheduling the alert check
+
+The Analytics rules can run without anyone opening the dashboard.
+`tools/check_alerts.py` exits 0 when everything is on track, 1 on a warning, 2 on
+a critical and 3 when it could not evaluate — so a scheduler can act on the
+result.
+
+**Linux** — a systemd timer, or cron:
+
+```cron
+# Weekday mornings, log the result and let the exit code speak.
+0 7 * * 1-6  cd /opt/executive-dashboard && .venv/bin/python tools/check_alerts.py --quiet >> runtime/logs/alerts.log 2>&1
+```
+
+**Windows** — a second scheduled task:
+
+```bat
+schtasks /create /tn "Dashboard alert check" /sc daily /st 07:00 ^
+  /ru "DOMAIN\svc_reporting" ^
+  /tr "C:\Reporting\Version_0\.venv\Scripts\python.exe C:\Reporting\Version_0\tools\check_alerts.py --quiet"
+```
+
+Add `--json` or `--csv` if something downstream should consume the result. There
+is no email step: this machine has no outbound access by design, so wire the
+exit code into whatever monitoring already runs on your network rather than
+giving the dashboard a mail path off the LAN.
+
 ## Checking it is healthy
 
 ```bash

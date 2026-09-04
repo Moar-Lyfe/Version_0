@@ -136,21 +136,33 @@ def breakdown(
 
 
 def daily_series(frame: pd.DataFrame, start: date, end: date) -> pd.DataFrame:
-    """Premium and sales per calendar day across the window, gaps filled."""
-    index = pd.date_range(start=start, end=end, freq="D")
-    if frame.empty:
-        return pd.DataFrame(
-            {S.PREMIUM: 0.0, S.SALES: 0.0}, index=index
-        ).rename_axis(S.DATE)
+    """All four KPIs per calendar day across the window, gaps filled with zero.
 
+    One row per calendar day whether or not anything was booked, which is what
+    the moving-average layer needs -- a missing day is a real zero, not an
+    absence.
+    """
+    index = pd.date_range(start=start, end=end, freq="D")
+    empty = pd.DataFrame(
+        {key: 0.0 for key in KPI_KEYS}, index=index
+    ).rename_axis(S.DATE)
+
+    if frame.empty:
+        return empty
     window = S.slice_dates(frame, start, end)
     if window.empty:
-        return pd.DataFrame(
-            {S.PREMIUM: 0.0, S.SALES: 0.0}, index=index
-        ).rename_axis(S.DATE)
+        return empty
+
+    working = window.copy()
+    working[CATEGORY_1] = working[S.SALES].where(
+        working[S.CATEGORY_KEY] == S.CATEGORY_1, 0.0
+    )
+    working[CATEGORY_2] = working[S.SALES].where(
+        working[S.CATEGORY_KEY] == S.CATEGORY_2, 0.0
+    )
 
     grouped = (
-        window.groupby(window[S.DATE].dt.normalize())[[S.PREMIUM, S.SALES]]
+        working.groupby(working[S.DATE].dt.normalize())[list(KPI_KEYS)]
         .sum()
         .reindex(index, fill_value=0.0)
     )
