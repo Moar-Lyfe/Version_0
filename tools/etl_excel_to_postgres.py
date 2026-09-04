@@ -42,7 +42,9 @@ from app.data.etl import (  # noqa: E402
     Outcome,
     load,
     normalise,
+    prune,
     read_sheet,
+    reconcile,
     record_run,
     write_csv,
 )
@@ -56,28 +58,194 @@ EXIT_OK, EXIT_READ_FAILED, EXIT_DB_FAILED = 0, 1, 2
 # --------------------------------------------------------------------------- #
 
 
-def resolve_input(settings, explicit: str | None) -> tuple[Path, object, int]:
-    """The workbook to read: the one named, else the newest the config matches."""
+def matched_workbooks(settings) -> list[tuple[Path, object, int]]:
+    """Every workbook the config matches, oldest first.
+
+    Oldest first matters: when two exports carry the same policy, the later one
+    should be the version that survives the merge.
+    """
+    found: list[tuple[Path, object, int]] = []
+    for source in settings.data.sources:
+        for path in discover_files(source):
+            found.append((path, source.sheet, source.header_row))
+    return sorted(found, key=lambda item: item[0].stat().st_mtime)
+
+
+def resolve_input(settings, explicit: str | None, load_all: bool) -> list[tuple[Path, object, int]]:
+    """The workbooks to read: the one named, all of them, or the newest match."""
     if explicit:
         path = Path(explicit).expanduser()
         if not path.is_file():
             raise FileNotFoundError(f"{path} does not exist.")
         source = settings.data.sources[0] if settings.data.sources else None
-        return path, (source.sheet if source else None), (source.header_row if source else 0)
+        return [
+            (
+                path,
+                source.sheet if source else None,
+                source.header_row if source else 0,
+            )
+        ]
 
-    for source in settings.data.sources:
-        files = discover_files(source)
-        if files:
-            newest = max(files, key=lambda p: p.stat().st_mtime)
-            return newest, source.sheet, source.header_row
-    raise FileNotFoundError(
-        "No workbook matched data.sources in config.yaml, and --file was not given."
+    found = matched_workbooks(settings)
+    if not found:
+        raise FileNotFoundError(
+            "No workbook matched data.sources in config.yaml, and --file was not "
+            "given."
+        )
+    return found if load_all else [found[-1]]
+
+
+def _reconcile(settings, args) -> int:
+    """Report -- and optionally delete -- rows Excel no longer has."""
+    pg = settings.data.postgres
+    try:
+        files = matched_workbooks(settings)
+    except OSError as exc:
+        print(f"Could not list workbooks: {exc}", file=sys.stderr)
+        return EXIT_READ_FAILED
+    if not files:
+        print("No workbook matched data.sources; nothing to compare.", file=sys.stderr)
+        return EXIT_READ_FAILED
+
+    print(f"Scanning {len(files)} workbook(s) against {pg.qualified_table()} ...")
+    try:
+        result = reconcile(files, settings.data, pg)
+    except database.DatabaseError as exc:
+        print(f"Reconcile failed: {exc}", file=sys.stderr)
+        return EXIT_DB_FAILED
+
+    for problem in result.problems:
+        print(f"  ! {problem}")
+    print(
+        f"  {result.keys_in_source:,} row(s) in Excel across "
+        f"{len(result.scanned_files)} file(s); "
+        f"{result.rows_in_scope:,} database row(s) attributed to them."
     )
+
+    if result.is_clean:
+        print("\nIn sync: every database row still exists in its workbook.")
+        return EXIT_OK
+
+    print(f"\n{len(result.orphans)} row(s) are in the database but not in Excel:")
+    for orphan in result.orphans[:40]:
+        print(
+            f"  {orphan.sale_date}  {orphan.policy_id or '(no policy)':<12} "
+            f"{orphan.agent:<18} {orphan.premium:>12,.2f}  "
+            f"{orphan.source_file}:{orphan.source_row}"
+        )
+    if len(result.orphans) > 40:
+        print(f"  ...and {len(result.orphans) - 40} more.")
+
+    total = sum(o.premium for o in result.orphans)
+    print(f"\n  {total:,.2f} in premium is still being counted for these rows.")
+
+    if not args.prune:
+        print(
+            "\nReport only. Re-run with --prune to delete them, once you have "
+            "checked the list -- a row missing because somebody filtered the "
+            "sheet is not a row that should be deleted."
+        )
+        return EXIT_OK
+
+    if not args.yes:
+        answer = input(f"\nDelete {len(result.orphans)} row(s)? [y/N] ")
+        if answer.strip().lower() not in {"y", "yes"}:
+            print("Cancelled. Nothing was deleted.")
+            return EXIT_OK
+
+    try:
+        deleted = prune(pg, result.orphans)
+    except database.DatabaseError as exc:
+        print(f"Prune failed: {exc}", file=sys.stderr)
+        return EXIT_DB_FAILED
+    print(f"Deleted {deleted:,} row(s).")
+    return EXIT_OK
+
+
+def _load_one(
+    path: Path, sheet, header_row: int, settings, args, pg
+) -> tuple[int, Outcome]:
+    """Read, stage and load one workbook. Returns (exit code, outcome)."""
+    started = datetime.now().astimezone()
+    outcome = Outcome()
+
+    try:
+        raw = read_sheet(path, sheet, header_row)
+        sheet_name = str(raw.attrs.get("sheet_name", sheet or "0"))
+        rows = normalise(raw, settings.data, path, sheet_name, header_row, outcome)
+    except Exception as exc:  # noqa: BLE001
+        print(f"Read failed for {path.name}: {exc}", file=sys.stderr)
+        return EXIT_READ_FAILED, outcome
+
+    print(f"Read   {path}  [{sheet_name}]")
+    print(f"       {outcome.rows_read:,} row(s) read, {len(rows):,} loadable")
+    for problem in outcome.problems:
+        print(f"       ! {problem}")
+
+    if not rows:
+        print("       nothing to load.")
+        return EXIT_OK, outcome
+
+    csv_dir = Path(args.csv_dir)
+    if not csv_dir.is_absolute():
+        csv_dir = Path(__file__).resolve().parent.parent / csv_dir
+    outcome.csv_path = write_csv(rows, csv_dir, path, sheet_name)
+    print(f"Stage  {outcome.csv_path}")
+
+    if args.csv_only:
+        return EXIT_OK, outcome
+    if args.dry_run:
+        print(
+            f"Dry run: {len(rows):,} row(s) would be merged into "
+            f"{pg.qualified_table()}."
+        )
+        return EXIT_OK, outcome
+
+    try:
+        load(outcome.csv_path, pg, outcome, args.on_conflict)
+    except database.DatabaseError as exc:
+        print(f"Load failed: {exc}", file=sys.stderr)
+        record_run(pg, outcome, path, sheet_name, started, "failed", str(exc))
+        return EXIT_DB_FAILED, outcome
+    except Exception as exc:  # noqa: BLE001
+        message = f"{type(exc).__name__}: {exc}"
+        print(f"Load failed: {message}", file=sys.stderr)
+        record_run(pg, outcome, path, sheet_name, started, "failed", message)
+        return EXIT_DB_FAILED, outcome
+
+    verb = "updated" if args.on_conflict == "update" else "already present"
+    print(
+        f"Load   {outcome.rows_staged:,} staged · "
+        f"{outcome.rows_inserted:,} inserted · "
+        f"{outcome.rows_updated:,} {verb} · "
+        f"{outcome.rows_skipped:,} unchanged"
+    )
+    record_run(pg, outcome, path, sheet_name, started, "succeeded", None)
+    return EXIT_OK, outcome
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--file", help="Workbook to load. Default: newest matched.")
+    parser.add_argument(
+        "--all",
+        dest="load_all",
+        action="store_true",
+        help="Load every matched workbook, oldest first, instead of just the newest.",
+    )
+    parser.add_argument(
+        "--reconcile",
+        action="store_true",
+        help="Report rows in the database whose source row is gone from Excel.",
+    )
+    parser.add_argument(
+        "--prune",
+        action="store_true",
+        help="With --reconcile, delete those rows. Asks first unless --yes.",
+    )
+    parser.add_argument(
+        "--yes", action="store_true", help="Skip the confirmation for --prune."
+    )
     parser.add_argument("--sheet", help="Sheet name or index. Default: from config.")
     parser.add_argument("--header-row", type=int, help="Zero-based header row.")
     parser.add_argument(
@@ -99,69 +267,43 @@ def main() -> int:
 
     settings = load_settings()
     pg = settings.data.postgres
-    started = datetime.now().astimezone()
-    outcome = Outcome()
 
-    # --- 1. read ---------------------------------------------------------- #
+    if args.reconcile or args.prune:
+        return _reconcile(settings, args)
+
     try:
-        path, sheet, header_row = resolve_input(settings, args.file)
-        if args.sheet is not None:
-            sheet = args.sheet
-        if args.header_row is not None:
-            header_row = args.header_row
-
-        raw = read_sheet(path, sheet, header_row)
-        sheet_name = str(raw.attrs.get("sheet_name", sheet or "0"))
-        rows = normalise(raw, settings.data, path, sheet_name, header_row, outcome)
-    except Exception as exc:  # noqa: BLE001 - reported, not raised at a terminal
+        workbooks = resolve_input(settings, args.file, args.load_all)
+    except (FileNotFoundError, OSError) as exc:
         print(f"Read failed: {exc}", file=sys.stderr)
         return EXIT_READ_FAILED
 
-    print(f"Read   {path}  [{sheet_name}]")
-    print(f"       {outcome.rows_read:,} row(s) read, {len(rows):,} loadable")
-    for problem in outcome.problems:
-        print(f"       ! {problem}")
+    if args.sheet is not None:
+        workbooks = [(path, args.sheet, header) for path, _, header in workbooks]
+    if args.header_row is not None:
+        workbooks = [(path, sheet, args.header_row) for path, sheet, _ in workbooks]
 
-    if not rows:
-        print("Nothing to load.")
-        return EXIT_OK
+    print(f"Target {pg.qualified_table()} @ {pg.describe()}")
+    if len(workbooks) > 1:
+        print(f"       {len(workbooks)} workbook(s), oldest first\n")
 
-    # --- 2. stage --------------------------------------------------------- #
-    csv_dir = Path(args.csv_dir)
-    if not csv_dir.is_absolute():
-        csv_dir = Path(__file__).resolve().parent.parent / csv_dir
-    outcome.csv_path = write_csv(rows, csv_dir, path, sheet_name)
-    print(f"Stage  {outcome.csv_path}")
+    totals = Outcome()
+    for path, sheet, header_row in workbooks:
+        code, outcome = _load_one(path, sheet, header_row, settings, args, pg)
+        totals.rows_read += outcome.rows_read
+        totals.rows_staged += outcome.rows_staged
+        totals.rows_inserted += outcome.rows_inserted
+        totals.rows_updated += outcome.rows_updated
+        totals.rows_skipped += outcome.rows_skipped
+        if code != EXIT_OK:
+            return code
+        if len(workbooks) > 1:
+            print()
 
-    if args.csv_only:
-        print("Stopped after the CSV (--csv-only).")
-        return EXIT_OK
-    if args.dry_run:
-        print(f"Dry run: {len(rows):,} row(s) would be merged into {pg.qualified_table()}.")
-        return EXIT_OK
-
-    # --- 3. load ---------------------------------------------------------- #
-    try:
-        load(outcome.csv_path, pg, outcome, args.on_conflict)
-    except database.DatabaseError as exc:
-        print(f"Load failed: {exc}", file=sys.stderr)
-        record_run(pg, outcome, path, sheet_name, started, "failed", str(exc))
-        return EXIT_DB_FAILED
-    except Exception as exc:  # noqa: BLE001
-        message = f"{type(exc).__name__}: {exc}"
-        print(f"Load failed: {message}", file=sys.stderr)
-        record_run(pg, outcome, path, sheet_name, started, "failed", message)
-        return EXIT_DB_FAILED
-
-    verb = "updated" if args.on_conflict == "update" else "already present"
-    print(f"Load   {pg.qualified_table()} @ {pg.describe()}")
-    print(
-        f"       {outcome.rows_staged:,} staged · "
-        f"{outcome.rows_inserted:,} inserted · "
-        f"{outcome.rows_updated:,} {verb} · "
-        f"{outcome.rows_skipped:,} unchanged"
-    )
-    record_run(pg, outcome, path, sheet_name, started, "succeeded", None)
+    if len(workbooks) > 1:
+        print(
+            f"Total  {totals.rows_read:,} read · {totals.rows_inserted:,} inserted · "
+            f"{totals.rows_updated:,} updated · {totals.rows_skipped:,} unchanged"
+        )
     return EXIT_OK
 
 

@@ -67,3 +67,47 @@ data:
 Only `date` is required. Anything unmapped falls back to a sensible default
 (premium 0, one sale per row, agent `Unassigned`), and Diagnostics shows exactly
 what resolved.
+
+## Backups
+
+```bash
+python tools/backup_database.py          # dump, verify, rotate (keeps 14)
+python tools/backup_database.py --list
+```
+
+Dumps land in `runtime/backups/` in PostgreSQL's custom format, and each one is
+read back with `pg_restore --list` immediately after it is written — a backup
+nobody has ever read is a hope, not a backup. A dump that fails partway is
+deleted rather than left behind looking like one.
+
+Restore into a **scratch database**, check it, and only then decide:
+
+```bash
+createdb reporting_restore
+pg_restore -d reporting_restore --no-owner runtime/backups/reporting_<stamp>.dump
+psql -d reporting_restore -c "SELECT count(*), min(sale_date), max(sale_date) FROM sales;"
+```
+
+To recover a single table rather than everything:
+
+```bash
+pg_restore -d reporting --no-owner --data-only --table=sales runtime/backups/<file>.dump
+```
+
+`runtime/backups/` is on the same machine as the database. Point `--dir` at a
+share, or copy them off — otherwise one disk failure takes both the database and
+its backups.
+
+## Reconciliation
+
+The ETL inserts and updates; it never deletes. A policy voided in Excel keeps
+being counted until somebody looks:
+
+```bash
+python tools/etl_excel_to_postgres.py --reconcile          # report only
+python tools/etl_excel_to_postgres.py --reconcile --prune  # delete, after asking
+```
+
+This scans every workbook `data.sources` matches and only judges rows whose
+`source_file` is among the files it actually read. Archiving an old export
+therefore takes its rows out of scope rather than marking them for deletion.

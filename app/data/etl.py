@@ -363,3 +363,152 @@ def record_run(
             connection.commit()
     except Exception:  # noqa: BLE001 - auditing must not break the pipeline
         pass
+
+
+# --------------------------------------------------------------------------- #
+# Reconciliation
+# --------------------------------------------------------------------------- #
+#
+# The merge inserts and updates. It has no concept of a row that went away, so a
+# policy voided or a line deleted in Excel keeps being counted -- permanently,
+# and silently. This finds that drift.
+#
+# The dangerous mistake here would be to compare the database against ONE
+# workbook: every row loaded from every other workbook would look orphaned, and
+# pruning would empty the table. So reconciliation scans every workbook the
+# config matches, and only ever judges rows attributed to a file it actually
+# read. A workbook that has been archived out of the folder takes its rows out
+# of scope rather than condemning them.
+
+
+@dataclass(frozen=True)
+class Orphan:
+    """A database row whose source row is no longer in the workbook."""
+
+    source_key: str
+    source_file: str
+    source_sheet: str
+    source_row: int
+    sale_date: object
+    agent: str
+    category: str
+    policy_id: str
+    premium: float
+
+
+@dataclass
+class Reconciliation:
+    scanned_files: list[str] = field(default_factory=list)
+    keys_in_source: int = 0
+    rows_in_scope: int = 0
+    orphans: list[Orphan] = field(default_factory=list)
+    problems: list[str] = field(default_factory=list)
+
+    @property
+    def is_clean(self) -> bool:
+        return not self.orphans
+
+
+def scan_source_keys(
+    files: list[tuple[Path, object, int]], settings: DataSettings
+) -> tuple[set[str], list[str], list[str]]:
+    """Every key currently present across the given workbooks.
+
+    Returns ``(keys, file names scanned, problems)``. A workbook that cannot be
+    read is reported and its name withheld from the scanned list, so its rows
+    stay out of scope instead of being judged against nothing.
+    """
+    keys: set[str] = set()
+    scanned: list[str] = []
+    problems: list[str] = []
+
+    for path, sheet, header_row in files:
+        outcome = Outcome()
+        try:
+            raw = read_sheet(path, sheet, header_row)
+            sheet_name = str(raw.attrs.get("sheet_name", sheet or "0"))
+            rows = normalise(raw, settings, path, sheet_name, header_row, outcome)
+        except Exception as exc:  # noqa: BLE001 - reported, not fatal
+            problems.append(f"{path.name}: could not be read ({exc}); rows left alone.")
+            continue
+        keys.update(row["source_key"] for row in rows)
+        scanned.append(path.name)
+
+    return keys, scanned, problems
+
+
+def find_orphans(
+    pg: PostgresSettings,
+    source_keys: set[str],
+    scanned_files: list[str],
+) -> tuple[list[Orphan], int]:
+    """Rows attributed to a scanned workbook whose key is no longer in it."""
+    if not scanned_files:
+        return [], 0
+
+    table = sql.Identifier(pg.db_schema, pg.table)
+    with database.connect(pg) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                sql.SQL(
+                    "SELECT source_key, source_file, source_sheet, source_row, "
+                    "sale_date, agent, category, policy_id, premium "
+                    "FROM {} WHERE source_file = ANY(%s)"
+                ).format(table),
+                (scanned_files,),
+            )
+            rows = cursor.fetchall()
+
+    orphans = [
+        Orphan(
+            source_key=str(r[0]),
+            source_file=str(r[1] or ""),
+            source_sheet=str(r[2] or ""),
+            source_row=int(r[3] or 0),
+            sale_date=r[4],
+            agent=str(r[5] or ""),
+            category=str(r[6] or ""),
+            policy_id=str(r[7] or ""),
+            premium=float(r[8] or 0),
+        )
+        for r in rows
+        if str(r[0]) not in source_keys
+    ]
+    return orphans, len(rows)
+
+
+def reconcile(
+    files: list[tuple[Path, object, int]],
+    settings: DataSettings,
+    pg: PostgresSettings,
+) -> Reconciliation:
+    """Compare the database against every workbook the config matches."""
+    keys, scanned, problems = scan_source_keys(files, settings)
+    result = Reconciliation(
+        scanned_files=scanned, keys_in_source=len(keys), problems=problems
+    )
+    if not scanned:
+        result.problems.append("No workbook could be read; nothing was compared.")
+        return result
+
+    orphans, in_scope = find_orphans(pg, keys, scanned)
+    result.orphans = sorted(orphans, key=lambda o: (o.source_file, o.source_row))
+    result.rows_in_scope = in_scope
+    return result
+
+
+def prune(pg: PostgresSettings, orphans: list[Orphan]) -> int:
+    """Delete the given rows. Deliberate, never automatic."""
+    if not orphans:
+        return 0
+    table = sql.Identifier(pg.db_schema, pg.table)
+    keys = [o.source_key for o in orphans]
+    with database.connect(pg) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                sql.SQL("DELETE FROM {} WHERE source_key = ANY(%s)").format(table),
+                (keys,),
+            )
+            deleted = cursor.rowcount
+        connection.commit()
+    return int(deleted)

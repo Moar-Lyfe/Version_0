@@ -107,8 +107,11 @@ PIPELINE_DEFAULTS: dict[str, tuple[str, ...]] = {
     MORNING: (
         "01_validate_sources.py",
         "03_load_excel_to_database.py",
+        # Backup after the load, so the dump carries the day's data.
+        "06_backup_database.py",
         "04_daily_snapshot.py",
         "05_alert_check.py",
+        "07_reconcile_sources.py",
     ),
 }
 

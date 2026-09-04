@@ -22,7 +22,7 @@ from app.admin.registry import Pipeline, Step
 from app.admin.runner import PipelineRunner, RunState
 from app.settings import AdminSettings, Settings
 from app.ui import components
-from app.views import widgets
+from app.views import auth, widgets
 
 RUNNER_KEY = "pipeline_runner"  # + ":<routine key>"
 POLL_SECONDS = 0.7
@@ -48,27 +48,6 @@ def _forget_runners() -> None:
     for key in list(st.session_state):
         if str(key).startswith(RUNNER_KEY):
             st.session_state.pop(key, None)
-
-
-def _authorised(settings: AdminSettings) -> bool:
-    expected = settings.required_password()
-    if expected is None:
-        return True
-    if st.session_state.get("admin_authorised"):
-        return True
-
-    st.info(
-        f"This panel is protected. Enter the value of `{settings.password_env}` "
-        "as configured on this machine."
-    )
-    with st.form("admin_gate"):
-        supplied = st.text_input("Password", type="password")
-        if st.form_submit_button("Unlock", type="primary"):
-            if supplied == expected:
-                st.session_state["admin_authorised"] = True
-                st.rerun()
-            st.error("Incorrect password.")
-    return False
 
 
 # --------------------------------------------------------------------------- #
@@ -428,7 +407,7 @@ def render(settings: Settings) -> None:
         )
         return
 
-    if not _authorised(settings.admin):
+    if not auth.gate(settings.admin, "The Admin panel", "admin_gate"):
         return
 
     active = registry.effective_admin_settings(settings.admin)

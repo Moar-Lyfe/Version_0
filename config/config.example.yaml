@@ -398,8 +398,17 @@ admin:
   working_dir: null
   # Hard stop for a single script, in seconds.
   timeout_seconds: 3600
-  # Optional gate. When set, the panel asks for the value held in this
-  # environment variable. Leave null for no password.
+  # THE OPERATOR PASSWORD. When set, both the Admin panel and the Database
+  # page ask for the value held in this environment variable -- they are the two
+  # pages that can *act* rather than merely report, and they share one gate.
+  #
+  # It also gates the dangerous console options: with no password configured,
+  # data.postgres.console.allow_writes and allow_maintenance are refused rather
+  # than honoured, because enabling writes on a page anyone on the LAN can open
+  # is not a configuration anyone means to choose.
+  #
+  # Leave null for no gate, which is a reasonable choice on a trusted LAN but
+  # should be a deliberate one.
   password_env: null
   # Extra environment variables handed to every script.
   environment: {}

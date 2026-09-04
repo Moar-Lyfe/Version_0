@@ -25,6 +25,7 @@ PIPELINES_FILE = RUNTIME_DIR / "pipelines.json"
 RUN_LOCK_FILE = RUNTIME_DIR / "pipeline.lock"
 OVERRIDE_FILE = RUNTIME_DIR / "admin_override.json"
 RUN_LOG_DIR = RUNTIME_DIR / "logs"
+BACKUP_DIR = RUNTIME_DIR / "backups"
 
 
 def resolve(path: str | Path) -> Path:

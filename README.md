@@ -128,7 +128,7 @@ number when the export has one. That makes the load idempotent:
 | Same workbook loaded again | Nothing. Rows are present and identical |
 | New rows appended in Excel | Only those rows insert |
 | A premium corrected in Excel | That row **updates**; no duplicate, no double count |
-| A row deleted from Excel | Stays in the database — deletion is deliberate, not incidental |
+| A row deleted from Excel | Stays in the database — see **Reconciliation** below |
 
 `--on-conflict ignore` switches to insert-only if you would rather corrections
 never flow through. The default is `update`, because a corrected row arriving as
@@ -138,17 +138,80 @@ Without a policy-number column, rows are keyed by a content hash, which means an
 edited row loads as a new one. The ETL says so when it happens — map
 `data.columns.policy_id` to avoid it.
 
+### Rows that disappear from Excel
+
+The merge inserts and updates. It has no concept of a row that went away, so a
+voided policy or a deleted line keeps being counted — silently, and the drift
+only grows.
+
+```bash
+python tools/etl_excel_to_postgres.py --reconcile          # report
+python tools/etl_excel_to_postgres.py --reconcile --prune  # delete, after asking
+```
+
+Reconciliation reads **every workbook the config matches** and compares. The
+scoping is what makes it safe: it only judges rows attributed to a file it
+actually read, so archiving last year's export takes those rows *out of scope*
+rather than condemning them. Comparing the database against a single workbook
+would otherwise mark every other row as an orphan, and pruning would empty the
+table.
+
+Deleting stays on the command line and asks first, because a row missing because
+somebody filtered the sheet is not a row that should be deleted. The Database
+page reports the same thing without the ability to delete.
+
+### Loading several workbooks
+
+`--all` walks every matched workbook, oldest first, so a later export wins when
+two carry the same policy:
+
+```bash
+python tools/etl_excel_to_postgres.py --all
+```
+
+Useful for a first load, a catch-up after downtime, or a folder of monthly
+files. Without it, only the newest match is loaded.
+
+### Backups
+
+Once the dashboard reads from Postgres, that database is the system of record
+for reporting — on one machine, with no outbound access and so no off-site copy
+arriving by accident.
+
+```bash
+python tools/backup_database.py            # dump, verify, rotate
+python tools/backup_database.py --list
+python tools/backup_database.py --keep 30 --dir /mnt/nas/dashboard
+```
+
+Each dump is written in PostgreSQL's custom format and then **read straight back
+with `pg_restore --list`**. A backup nobody has ever read is a hope, not a
+backup, and the cheapest moment to find a truncated file is the moment it is
+written. A dump that fails to write is deleted rather than left behind looking
+like a backup.
+
+Restore into a scratch database first, never over the live one:
+
+```bash
+createdb reporting_restore
+pg_restore -d reporting_restore --no-owner runtime/backups/<file>.dump
+```
+
+`runtime/backups/` sits on the same machine as the database. Copy them
+elsewhere, or one disk failure takes both.
+
 ### Scheduling
 
 ```cron
-0 5 * * 1-6  cd /opt/executive-dashboard && .venv/bin/python tools/etl_excel_to_postgres.py >> runtime/logs/etl.log 2>&1
-0 6 * * 1-6  cd /opt/executive-dashboard && .venv/bin/python tools/snapshot_kpis.py       >> runtime/logs/snapshots.log 2>&1
-0 7 * * 1-6  cd /opt/executive-dashboard && .venv/bin/python tools/check_alerts.py --quiet >> runtime/logs/alerts.log 2>&1
+0 5 * * 1-6  cd /opt/executive-dashboard && .venv/bin/python tools/etl_excel_to_postgres.py  >> runtime/logs/etl.log 2>&1
+15 5 * * 1-6 cd /opt/executive-dashboard && .venv/bin/python tools/backup_database.py        >> runtime/logs/backup.log 2>&1
+0 6 * * 1-6  cd /opt/executive-dashboard && .venv/bin/python tools/snapshot_kpis.py          >> runtime/logs/snapshots.log 2>&1
+0 7 * * 1-6  cd /opt/executive-dashboard && .venv/bin/python tools/check_alerts.py --quiet   >> runtime/logs/alerts.log 2>&1
 ```
 
-Order matters: load, then snapshot what was loaded, then judge it. Exit codes
-are 0 loaded, 1 read failure (nothing loaded), 2 database failure (nothing
-committed).
+Order matters: load, back up what was loaded, snapshot what is being reported,
+then judge it. Exit codes are 0 loaded, 1 read failure (nothing loaded), 2
+database failure (nothing committed).
 
 `scripts/03_load_excel_to_database.py` does the same thing from the **Admin**
 panel, with a confirmation prompt before it writes — for when the load should be
@@ -531,7 +594,7 @@ The panel is split into named routines, each with its own saved run order:
 | Routine | What it does |
 |---|---|
 | **ETL** | Move the latest Excel export into the reporting database. Asks before it writes |
-| **Morning Maintenance** | The start-of-day sequence: check the sources are reachable → load overnight's export → record what is being reported → judge it |
+| **Morning Maintenance** | The start-of-day sequence: check the sources → load overnight's export → back it up → record what is being reported → judge it → reconcile against Excel |
 | **Scripts** | Everything else in the scripts folder, in whatever order you set |
 
 They share one run lock, because they share one database and one set of output
@@ -603,8 +666,30 @@ ask it something directly.
   estimates; the headline figure is an exact count.
 - **Load history** — the last twenty ETL runs, with what each one inserted,
   updated and left alone.
+- **Reconciliation** — rows the database still counts that Excel no longer has.
+- **Backups** — what has been dumped, how old the newest is, and how to restore.
 - **Console** — SQL, with examples to start from.
 - **Maintenance** — apply `db/schema.sql`, `ANALYZE`, `VACUUM`.
+
+### Who can open these pages
+
+The **Admin panel** and the **Database page** are the two that can *act* rather
+than report — one runs Python, the other runs SQL. They share one gate:
+
+```yaml
+admin:
+  password_env: "EXEC_DASH_OPERATOR"   # the name of the variable, not the password
+```
+
+Set that variable for the account running the dashboard and both pages ask for
+it; unlock once and both open. Leave `password_env` null and there is no gate,
+which is defensible on a trusted LAN but should be a decision rather than an
+oversight.
+
+It also gates the dangerous console options: **with no password configured,
+`allow_writes` and `allow_maintenance` are refused rather than honoured**, and
+the page says why. Enabling writes on a page anyone on the LAN can open is not a
+configuration anybody means to choose.
 
 ### The console is read-only, and PostgreSQL is what enforces it
 
@@ -692,7 +777,8 @@ app/
     excel_loader.py    workbook discovery, column mapping, normalisation
     postgres_loader.py the same canonical table, read from the database
     database.py        connections, and errors phrased for a human
-    etl.py             Excel -> CSV -> Postgres, as a library
+    etl.py             Excel -> CSV -> Postgres, plus reconciliation
+    backup.py          pg_dump, verification and rotation
     db_console.py      guarded queries, table stats, maintenance
     loader.py          source dispatch, with no Streamlit attached
     repository.py      source dispatch, caching and the refresh button
@@ -705,6 +791,7 @@ app/
     analytics.py       moving-average monitoring and alerts
     admin.py           the Admin panel: ETL, Morning Maintenance, Scripts
     database.py        the Database page and SQL console
+    auth.py            the operator gate, shared by Admin and Database
     diagnostics.py     "where did this number come from"
   admin/
     registry.py        script discovery and per-routine run orders

@@ -368,3 +368,142 @@ def test_new_rows_load_incrementally(workbook, data_settings, live_pg, tmp_path)
     assert outcome.rows_inserted == 1
     assert outcome.rows_skipped == 1
     assert count_rows(live_pg)[0] == 4
+
+
+# --------------------------------------------------------------------------- #
+# Reconciliation -- rows Excel no longer has
+# --------------------------------------------------------------------------- #
+
+
+@requires_db
+def test_a_deleted_excel_row_shows_as_an_orphan(
+    workbook, data_settings, live_pg, tmp_path
+):
+    rows, _ = normalise(workbook, data_settings)
+    etl.load(
+        etl.write_csv(rows, tmp_path / "etl", workbook, "Production"),
+        live_pg, etl.Outcome(), "update",
+    )
+
+    # The same workbook, with one policy removed.
+    trimmed = write_workbook(
+        tmp_path / "export.xlsx",   # same filename: same source_file in the table
+        [
+            ["2026-09-01", "Dana Whitfield", "Term Life", "Referral", "P-1", "$1,200.50", 1],
+            ["2026-09-02", "Marcus Vale", "Annuity", "Referral", "P-3", "(250.00)", 2],
+        ],
+    )
+    result = etl.reconcile([(trimmed, "Production", 0)], data_settings, live_pg)
+
+    assert not result.is_clean
+    assert [o.policy_id for o in result.orphans] == ["P-2"]
+    assert result.rows_in_scope == 3
+
+
+@requires_db
+def test_an_unchanged_workbook_reconciles_clean(
+    workbook, data_settings, live_pg, tmp_path
+):
+    rows, _ = normalise(workbook, data_settings)
+    etl.load(
+        etl.write_csv(rows, tmp_path / "etl", workbook, "Production"),
+        live_pg, etl.Outcome(), "update",
+    )
+    result = etl.reconcile([(workbook, "Production", 0)], data_settings, live_pg)
+    assert result.is_clean
+    assert result.orphans == []
+
+
+@requires_db
+def test_rows_from_an_unscanned_workbook_are_never_condemned(
+    workbook, data_settings, live_pg, tmp_path
+):
+    """The mistake that would empty the table.
+
+    Reconciling against one workbook must not condemn rows loaded from a
+    different one -- otherwise archiving last year's export would delete last
+    year's data.
+    """
+    first, _ = normalise(workbook, data_settings)
+    etl.load(
+        etl.write_csv(first, tmp_path / "etl", workbook, "Production"),
+        live_pg, etl.Outcome(), "update",
+    )
+
+    other = write_workbook(
+        tmp_path / "other.xlsx",
+        [["2026-08-01", "Priya", "Term Life", "Referral", "P-99", "$400.00", 1]],
+    )
+    second, _ = normalise(other, data_settings)
+    etl.load(
+        etl.write_csv(second, tmp_path / "etl", other, "Production"),
+        live_pg, etl.Outcome(), "update",
+    )
+    assert count_rows(live_pg)[0] == 4
+
+    # Scan only the second workbook.
+    result = etl.reconcile([(other, "Production", 0)], data_settings, live_pg)
+    assert result.is_clean
+    assert result.rows_in_scope == 1        # only other.xlsx's row was in scope
+
+
+@requires_db
+def test_an_unreadable_workbook_takes_its_rows_out_of_scope(
+    workbook, data_settings, live_pg, tmp_path
+):
+    rows, _ = normalise(workbook, data_settings)
+    etl.load(
+        etl.write_csv(rows, tmp_path / "etl", workbook, "Production"),
+        live_pg, etl.Outcome(), "update",
+    )
+
+    broken = tmp_path / "broken.xlsx"
+    broken.write_bytes(b"not a workbook")
+    result = etl.reconcile(
+        [(workbook, "Production", 0), (broken, "Production", 0)],
+        data_settings,
+        live_pg,
+    )
+    assert any("could not be read" in p for p in result.problems)
+    assert result.is_clean          # the readable one still matched
+
+
+@requires_db
+def test_prune_deletes_exactly_the_orphans(
+    workbook, data_settings, live_pg, tmp_path
+):
+    rows, _ = normalise(workbook, data_settings)
+    etl.load(
+        etl.write_csv(rows, tmp_path / "etl", workbook, "Production"),
+        live_pg, etl.Outcome(), "update",
+    )
+    before_rows, before_total = count_rows(live_pg)
+
+    trimmed = write_workbook(
+        tmp_path / "export.xlsx",
+        [
+            ["2026-09-01", "Dana Whitfield", "Term Life", "Referral", "P-1", "$1,200.50", 1],
+            ["2026-09-02", "Marcus Vale", "Annuity", "Referral", "P-3", "(250.00)", 2],
+        ],
+    )
+    result = etl.reconcile([(trimmed, "Production", 0)], data_settings, live_pg)
+    deleted = etl.prune(live_pg, result.orphans)
+
+    after_rows, after_total = count_rows(live_pg)
+    assert deleted == 1
+    assert after_rows == before_rows - 1
+    # P-2 carried 800.00.
+    assert before_total - after_total == pytest.approx(800.0)
+
+
+@requires_db
+def test_pruning_nothing_is_a_no_op(live_pg):
+    assert etl.prune(live_pg, []) == 0
+
+
+def test_scanning_no_files_reports_rather_than_guessing(data_settings, tmp_path):
+    """No database needed: an empty scan must never be read as "delete all"."""
+    keys, scanned, problems = etl.scan_source_keys([], data_settings)
+    assert keys == set()
+    assert scanned == []
+    assert problems == []

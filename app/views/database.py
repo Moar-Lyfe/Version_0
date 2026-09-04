@@ -11,17 +11,22 @@ the LAN can reach this console.
 
 from __future__ import annotations
 
+import dataclasses
+
 import pandas as pd
 import streamlit as st
 
 from app import paths
-from app.data import database, db_console, postgres_loader
+from app.data import backup, database, db_console, postgres_loader
+from app.data.etl import reconcile
+from app.data.excel_loader import discover_files
 from app.settings import POSTGRES, Settings
 from app.ui import components
 from app.ui.theme import format_currency, md_escape
-from app.views import widgets
+from app.views import auth, widgets
 
 RESULT_KEY = "db_console_result"
+RECONCILE_KEY = "db_reconcile_result"
 STATEMENT_KEY = "db_console_statement"
 
 EXAMPLES = {
@@ -213,13 +218,155 @@ def _render_result(result: db_console.QueryResult, settings: Settings) -> None:
     )
 
 
+def _writes_permitted(settings: Settings) -> tuple[bool, str | None]:
+    """Whether the console may write, and why not when it may not.
+
+    Two locks, both of which must be open: the config flag, and a configured
+    operator password. Enabling writes on a page anyone on the LAN can open,
+    with no password in front of it, is not a configuration anyone means to
+    choose -- so it is refused rather than honoured.
+    """
+    if not settings.data.postgres.console.allow_writes:
+        return False, None
+    notice = auth.lock_notice(settings.admin)
+    if notice:
+        return False, notice
+    return True, None
+
+
+def _reconciliation(settings: Settings) -> None:
+    """Rows the database still counts that Excel no longer has."""
+    components.section("Reconciliation", "database against the workbooks")
+    st.caption(
+        "The load inserts and updates; it has no concept of a row that went "
+        "away. A voided policy keeps being counted until somebody looks. This "
+        "reads every workbook the config matches and compares — and only ever "
+        "judges rows attributed to a file it actually read, so an archived "
+        "workbook takes its rows out of scope rather than condemning them."
+    )
+
+    if st.button("Check for rows Excel no longer has", key="db_reconcile"):
+        files = [
+            (path, source.sheet, source.header_row)
+            for source in settings.data.sources
+            for path in discover_files(source)
+        ]
+        if not files:
+            st.warning("No workbook matched `data.sources`; nothing to compare.")
+        else:
+            with st.spinner(f"Reading {len(files)} workbook(s)…"):
+                st.session_state[RECONCILE_KEY] = reconcile(
+                    files, settings.data, settings.data.postgres
+                )
+
+    result = st.session_state.get(RECONCILE_KEY)
+    if result is None:
+        return
+
+    for problem in result.problems:
+        st.warning(problem)
+
+    components.meta_strip(
+        [
+            f"{result.keys_in_source:,} rows in Excel",
+            f"{result.rows_in_scope:,} database rows in scope",
+            f"{len(result.scanned_files)} workbook(s) scanned",
+        ]
+    )
+
+    if result.is_clean:
+        st.success("In sync: every database row still exists in its workbook.")
+        return
+
+    total = sum(o.premium for o in result.orphans)
+    st.warning(
+        f"**{len(result.orphans)} row(s) are in the database but not in Excel**, "
+        f"still contributing "
+        f"{format_currency(total, settings.app.currency_symbol)} of premium."
+    )
+    widgets.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "Date": str(o.sale_date),
+                    "Policy": o.policy_id or "(none)",
+                    "Agent": o.agent,
+                    "Category": o.category,
+                    "Premium": o.premium,
+                    "From": f"{o.source_file}:{o.source_row}",
+                }
+                for o in result.orphans[:200]
+            ]
+        ),
+        hide_index=True,
+    )
+    st.caption(
+        md_escape(
+            "Deleting is deliberate and lives on the command line, because a row "
+            "missing because somebody filtered the sheet is not a row that should "
+            "be deleted:  `python tools/etl_excel_to_postgres.py --reconcile "
+            "--prune`"
+        )
+    )
+
+
+def _backups(settings: Settings) -> None:
+    """What has been backed up, and how to get it back."""
+    components.section("Backups", "the database is the system of record now")
+
+    found = backup.existing(paths.BACKUP_DIR)
+    if not found:
+        st.warning(
+            "**No backups on disk.** Reporting now reads from this database, on "
+            "this machine, with no off-site copy arriving by accident. Run "
+            "`python tools/backup_database.py`, or let Morning Maintenance do it."
+        )
+    else:
+        newest_path, newest_size, newest_when = found[0]
+        age_hours = (pd.Timestamp.now() - pd.Timestamp(newest_when)).total_seconds() / 3600
+        components.meta_strip(
+            [
+                f"{len(found)} backup(s)",
+                f"Newest {newest_when:%Y-%m-%d %H:%M} ({age_hours:,.0f}h ago)",
+                f"{newest_size / 1_048_576:,.1f} MB",
+                f"In {paths.BACKUP_DIR}",
+            ]
+        )
+        if age_hours > 48:
+            st.warning(
+                f"The newest backup is {age_hours / 24:,.1f} days old. Is the "
+                "Morning Maintenance routine still running?"
+            )
+        widgets.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "Taken": when.strftime("%Y-%m-%d %H:%M"),
+                        "File": path.name,
+                        "Size (MB)": round(size / 1_048_576, 1),
+                    }
+                    for path, size, when in found[:15]
+                ]
+            ),
+            hide_index=True,
+        )
+
+    st.caption(
+        md_escape(
+            "Restore into a scratch database first, never over the live one:  "
+            "`createdb reporting_restore && pg_restore -d reporting_restore "
+            "--no-owner <file>.dump`.  These sit on the same machine as the "
+            "database — copy them elsewhere, or one disk failure takes both."
+        )
+    )
+
+
 def _console(settings: Settings) -> None:
     pg = settings.data.postgres
     console = pg.console
-    components.section(
-        "Console",
-        "read-only" if not console.allow_writes else "WRITES ENABLED",
-    )
+    writes_ok, blocked_reason = _writes_permitted(settings)
+
+    components.section("Console", "WRITES ENABLED" if writes_ok else "read-only")
 
     if not console.enabled:
         st.caption(
@@ -228,12 +375,16 @@ def _console(settings: Settings) -> None:
         )
         return
 
-    if console.allow_writes:
+    if blocked_reason:
+        st.error(
+            "**`allow_writes` is on, but writes are refused.** " + blocked_reason
+        )
+    elif writes_ok:
         st.warning(
             "**Writes are enabled for this console.** Anyone who can reach this "
-            "page can change or delete data. Set "
-            "`data.postgres.console.allow_writes: false` unless you are actively "
-            "using it."
+            "page and knows the operator password can change or delete data. "
+            "Set `data.postgres.console.allow_writes: false` unless you are "
+            "actively using it."
         )
     else:
         st.caption(
@@ -270,18 +421,22 @@ def _console(settings: Settings) -> None:
             write_mode = st.checkbox(
                 "Write mode",
                 value=False,
-                disabled=not console.allow_writes,
+                disabled=not writes_ok,
                 help=(
                     "Allow this statement to change data."
-                    if console.allow_writes
-                    else "Disabled: set data.postgres.console.allow_writes to enable."
+                    if writes_ok
+                    else "Disabled. Needs data.postgres.console.allow_writes "
+                    "and a configured operator password."
                 ),
             )
 
     if submitted:
         st.session_state[STATEMENT_KEY] = statement
         st.session_state[RESULT_KEY] = db_console.run_query(
-            pg, statement, console, write_mode=write_mode
+            pg,
+            statement,
+            console if writes_ok else dataclasses.replace(console, allow_writes=False),
+            write_mode=write_mode,
         )
 
     result = st.session_state.get(RESULT_KEY)
@@ -300,6 +455,11 @@ def _maintenance(settings: Settings) -> None:
             "`data.postgres.console.allow_maintenance: true` in config.yaml to "
             "allow applying the schema and running ANALYZE / VACUUM from here."
         )
+        return
+
+    notice = auth.lock_notice(settings.admin)
+    if notice:
+        st.error("**`allow_maintenance` is on, but the actions are refused.** " + notice)
         return
 
     st.caption(
@@ -334,6 +494,9 @@ def render(settings: Settings) -> None:
     components.masthead("Database", settings.app.organization)
     components.subhead("The reporting database: what is in it, and a way to ask it.")
 
+    if not auth.gate(settings.admin, "The Database page", "database_gate"):
+        return
+
     if settings.data.source_type != POSTGRES:
         components.empty_state(
             "Reading from Excel",
@@ -364,5 +527,7 @@ def render(settings: Settings) -> None:
 
     _contents(settings)
     _load_history(settings)
+    _reconciliation(settings)
+    _backups(settings)
     _console(settings)
     _maintenance(settings)
