@@ -396,7 +396,10 @@ def format_compact(value: float, is_currency: bool, symbol: str = "$") -> str:
     magnitude = abs(value)
     for threshold, suffix in ((1_000_000_000, "B"), (1_000_000, "M"), (1_000, "K")):
         if magnitude >= threshold:
-            return f"{sign}{prefix}{magnitude / threshold:,.1f}{suffix}"
+            scaled = magnitude / threshold
+            # A round figure reads better without the decimal: $700K, not $700.0K.
+            places = 0 if abs(scaled - round(scaled)) < 0.05 else 1
+            return f"{sign}{prefix}{scaled:,.{places}f}{suffix}"
     return f"{sign}{prefix}{magnitude:,.0f}"
 
 
@@ -409,6 +412,17 @@ def format_projection(value: float, is_currency: bool, symbol: str = "$") -> str
     if is_currency:
         return format_currency(value, symbol)
     return format_count(round(value))
+
+
+def md_escape(text: str) -> str:
+    """Make text safe to hand to a Streamlit markdown call.
+
+    Streamlit renders ``$...$`` as LaTeX, so a sentence carrying two currency
+    figures -- "the $700,000 target needs $27,230/day" -- silently loses both
+    dollar signs and the text between them. Escaping the dollars is the fix;
+    it is invisible when there is only one.
+    """
+    return text.replace("$", "\\$")
 
 
 def delta_parts(current: float, prior: float) -> tuple[str, str]:

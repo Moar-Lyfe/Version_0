@@ -7,7 +7,8 @@ working-day calendar, and breaks any period out by agent.
 
 An **Analytics** page tracks every KPI on 15/30/45/90-day moving averages and
 raises an alert when one slips — against a number you set, or against the
-metric's own history when nobody has set one.
+metric's own history when nobody has set one. Set targets and it also reports
+attainment and the daily pace needed to hit them.
 
 It also ships an **Admin** panel that runs your other Python scripts in a
 configurable order and lets you answer their terminal prompts from the browser.
@@ -209,6 +210,70 @@ picked up on the next interaction even without pressing the button.
 sorted by premium, with a share-of-premium bar and a totals row that reconciles
 against the cards above. Switch the rows to **Category** or **Channel** with the
 group-by control, and export the current view as CSV.
+
+---
+
+## Targets
+
+A projection says where the month will land. A target says whether that is good
+enough — and what the remaining working days need to close the gap.
+
+```yaml
+targets:
+  premium:
+    month: 700000
+    year: 8500000
+  sales:
+    month: 200
+  overrides:                 # a month that is not like the others
+    premium:
+      "2026-12": 950000
+```
+
+Targets are **period totals**, not daily rates. With one set, a KPI card shows
+how much is banked and where the current pace lands, the **All periods** table
+gains a target row directly under its projection, and the Dashboard prints the
+line people actually act on:
+
+> To reach the September target of $700,000, the remaining 21 working days need
+> $27,230/day. Current pace is $32,042/day, ahead of what the target needs.
+
+The required pace is computed against the same working calendar as everything
+else, so it excludes Sundays and holidays rather than quietly assuming the team
+works through them. A target also becomes a reference line on the
+moving-average chart, converted to the daily rate it implies.
+
+**An absent target means "no target", never zero.** Leave a metric out and its
+card simply shows the projection instead.
+
+---
+
+## Snapshots — what did we report last Tuesday?
+
+Every figure is recomputed from the workbooks as they stand right now. That is
+usually what you want, and it quietly means history moves: a corrected row, a
+restated policy, a re-exported month, and last month's premium is no longer the
+number anyone saw at the time.
+
+```bash
+python tools/snapshot_kpis.py                    # record today
+python tools/snapshot_kpis.py --check            # restatements only, write nothing
+python tools/snapshot_kpis.py --as-reported 2026-09-01
+python tools/snapshot_kpis.py --list
+```
+
+Two small append-only CSVs under `runtime/snapshots/`: the headline figures for
+every window as they were reported, and the daily totals over a trailing window.
+Comparing the two is what makes a **restatement** visible:
+
+```
+1 restatement(s) since the snapshot of 2026-09-03:
+  2026-08-25  premium     $17,848.80 -> $116,461.18  +98,612.38 (+552.5%)
+```
+
+Re-running on the same day replaces that day's rows rather than appending, so
+the step is safe to run more than once. Diagnostics shows the archive and any
+restatements against current data. Exit code 1 means a closed day has moved.
 
 ---
 
@@ -453,6 +518,8 @@ app/
     projections.py     straight-line month and year projections
     analytics.py       moving averages, alert rules, presets
     data_health.py     freshness, row volume and source checks
+    targets.py         goals, attainment and required pace
+    snapshots.py       the archive of what was reported
   data/
     schema.py          the canonical table every workbook becomes
     excel_loader.py    discovery, column mapping, normalisation
@@ -474,7 +541,7 @@ config/                config.example.yaml (committed) + config.yaml (yours)
 deploy/                systemd unit for running it as a service
 docs/                  deployment.md -- LAN setup, firewall, autostart
 scripts/               example pipeline scripts
-tools/                 sample-data generator, pipeline runner, alert checker
+tools/                 sample data, pipeline runner, alert checker, snapshots
 tests/                 pytest suite
 runtime/               saved run order and run logs (git-ignored)
 ```
@@ -506,6 +573,7 @@ Common fixes:
 | Rows are missing | Their date cell is text Excel never parsed — see "Skipped (bad date)" |
 | A month projects too high | `count_today_as_elapsed: true` divides by a partial day |
 | Everything looks like a collapse | The feed has stopped updating — check the Data health alerts first |
+| Last month's figure changed | A row was restated — `python tools/snapshot_kpis.py --check` |
 
 ---
 

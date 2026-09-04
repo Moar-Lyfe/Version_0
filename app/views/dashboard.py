@@ -17,7 +17,7 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 
-from app.core import analytics, data_health, kpis, projections
+from app.core import analytics, data_health, kpis, projections, targets
 from app.core.calendar_rules import WorkingCalendar
 from app.core.periods import MONTH, PERIOD_ORDER, build_periods
 from app.data import repository
@@ -25,7 +25,14 @@ from app.data import schema as S
 from app.settings import Settings
 from app.ui import charts, components
 from app.ui.components import Card
-from app.ui.theme import STATUS, delta_parts, format_projection, format_value
+from app.ui.theme import (
+    STATUS,
+    delta_parts,
+    format_compact,
+    format_projection,
+    format_value,
+    md_escape,
+)
 from app.views import widgets
 
 GROUP_COLUMNS = {
@@ -84,12 +91,15 @@ def _kpi_cards(
     frame: pd.DataFrame,
     period,
     projection_map: dict[str, projections.Projection],
-) -> None:
+) -> dict[str, targets.Attainment]:
+    """The four KPI cards. Returns whatever targets were in force."""
     symbol = settings.app.currency_symbol
     current = kpis.compute_window(frame, period.start, period.end)
     prior = kpis.compute_window(frame, period.prior_start, period.prior_end)
 
     cards: list[Card] = []
+    attainments: dict[str, targets.Attainment] = {}
+
     for definition in kpis.kpi_definitions(settings.data):
         value = current.get(definition.key)
         delta_text, delta_css = delta_parts(value, prior.get(definition.key))
@@ -97,7 +107,29 @@ def _kpi_cards(
         footnote = ""
         progress = None
         projection = projection_map.get(definition.key)
-        if projection is not None:
+
+        attainment = targets.measure(
+            settings.targets,
+            definition.key,
+            period,
+            actual=value,
+            projected=projection.projected if projection else None,
+            basis=projection.basis if projection else None,
+        )
+        if attainment is not None:
+            attainments[definition.key] = attainment
+            # Against a target, the useful pair is how much is banked and where
+            # the current pace lands -- not the raw projection on its own.
+            goal = format_compact(
+                attainment.target.value, definition.is_currency, symbol
+            )
+            projected_pct = attainment.projected_pct
+            tail = (
+                f" · pace {projected_pct:.0f}%" if projected_pct is not None else ""
+            )
+            footnote = f"{attainment.achieved_pct:.0f}% of {goal} target{tail}"
+            progress = attainment.achieved_pct / 100.0
+        elif projection is not None:
             projected = format_projection(
                 projection.projected, definition.is_currency, symbol
             )
@@ -116,6 +148,55 @@ def _kpi_cards(
             )
         )
     components.kpi_grid(cards)
+    return attainments
+
+
+def _target_note(settings: Settings, attainments: dict[str, targets.Attainment]) -> None:
+    """What the rest of the period needs -- the most actionable line on the page."""
+    headline = attainments.get(kpis.PREMIUM)
+    if headline is None:
+        return
+
+    symbol = settings.app.currency_symbol
+    goal = format_value(headline.target.value, True, symbol)
+
+    if headline.is_met:
+        st.caption(
+            md_escape(
+                f"The {headline.target.label} of {goal} is already met — "
+                f"{headline.achieved_pct:.0f}% booked."
+            )
+        )
+        return
+
+    required = headline.required_pace
+    if required is None:
+        st.caption(
+            md_escape(
+                f"{headline.achieved_pct:.0f}% of the {headline.target.label} "
+                f"({goal}), with no working days left in the period."
+            )
+        )
+        return
+
+    current = headline.current_pace
+    verdict = (
+        "ahead of what the target needs"
+        if headline.on_track
+        else "short of what the target needs"
+    )
+    pace_note = (
+        f" Current pace is {format_value(current, True, symbol)}/day, {verdict}."
+        if current is not None
+        else ""
+    )
+    st.caption(
+        md_escape(
+            f"To reach the {headline.target.label} of {goal}, the remaining "
+            f"{headline.basis.remaining} working days need "
+            f"{format_value(required, True, symbol)}/day.{pace_note}"
+        )
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -155,9 +236,10 @@ def _matrix(
         if not projected:
             continue
         suffix = "month" if key == MONTH else "year"
+        stem = period.label.split(" to")[0]
         rows.append(
             {
-                "Period": f"{period.label.split(' to')[0]} projected ({suffix} end)",
+                "Period": f"{stem} projected ({suffix} end)",
                 **{
                     d.label: format_projection(
                         projected[d.key].projected, d.is_currency, symbol
@@ -166,6 +248,27 @@ def _matrix(
                 },
             }
         )
+
+        # A target row sits directly under its projection, so the comparison is
+        # a glance down the column rather than arithmetic.
+        goals = {
+            d.label: targets.resolve(settings.targets, d.key, period)
+            for d in definitions
+        }
+        if any(goals.values()):
+            rows.append(
+                {
+                    "Period": f"{stem} target",
+                    **{
+                        d.label: (
+                            format_value(goals[d.label].value, d.is_currency, symbol)
+                            if goals[d.label]
+                            else "—"
+                        )
+                        for d in definitions
+                    },
+                }
+            )
 
     return pd.DataFrame(rows)
 
@@ -371,7 +474,7 @@ def render(settings: Settings) -> None:
         else f"{period.start:%b %d} – {period.end:%b %d, %Y}"
     )
     components.section(period.label, window_note)
-    _kpi_cards(settings, frame, period, projection_map)
+    attainments = _kpi_cards(settings, frame, period, projection_map)
 
     if projection_map:
         basis = next(iter(projection_map.values())).basis
@@ -381,6 +484,8 @@ def render(settings: Settings) -> None:
             f"elapsed ({closed}), {basis.remaining} remaining through "
             f"{basis.period_end:%b %d}. Sundays and observed holidays are excluded."
         )
+
+    _target_note(settings, attainments)
 
     components.section("All periods", "actuals and full-period projections")
     widgets.dataframe(

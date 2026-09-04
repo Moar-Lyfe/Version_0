@@ -258,6 +258,58 @@ analytics:
   #     enabled: false        # kept on file, never evaluated
 
 # -----------------------------------------------------------------------------
+# TARGETS
+# -----------------------------------------------------------------------------
+# A projection says where the month will land. A target says whether that is
+# good enough -- and what the remaining working days need to close the gap.
+#
+# Targets are PERIOD TOTALS (a whole month, a whole year), not daily rates. The
+# dashboard derives attainment, projected attainment, and the per-working-day
+# pace required, all against the same working calendar as everything else.
+#
+# An absent target means "no target" -- never zero. Leave a metric out and its
+# card simply shows the projection instead.
+# -----------------------------------------------------------------------------
+targets:
+  enabled: true
+  # premium:
+  #   month: 700000
+  #   year: 8500000
+  # sales:
+  #   month: 200
+  #   year: 2400
+  # category_1:
+  #   month: 90
+  # category_2:
+  #   month: 85
+  #
+  # A month that is not like the others -- open enrolment, a slow August:
+  # overrides:
+  #   premium:
+  #     "2026-12": 950000
+  #     "2026-08": 500000
+
+# -----------------------------------------------------------------------------
+# SNAPSHOTS -- a record of what was reported
+# -----------------------------------------------------------------------------
+# Every figure on the dashboard is recomputed from the workbooks as they stand
+# right now, which quietly means history moves: a corrected row or a re-export
+# changes what last month "was". A nightly snapshot freezes what was reported,
+# so "what did we report on September 1?" is answerable, and a restatement is
+# visible instead of invisible.
+#
+# Schedule `python tools/snapshot_kpis.py` after whatever refreshes the
+# workbooks. It exits 1 when a closed day's figure has moved.
+# -----------------------------------------------------------------------------
+snapshots:
+  enabled: true
+  directory: "runtime/snapshots"
+  # Trailing days captured each run, for detecting changes to closed days.
+  daily_days: 45
+  # Below this, a difference is float noise rather than a restatement.
+  restatement_tolerance: 0.01
+
+# -----------------------------------------------------------------------------
 # ADMIN PANEL
 # -----------------------------------------------------------------------------
 admin:

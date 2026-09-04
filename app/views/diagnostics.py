@@ -15,6 +15,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+from app.core import snapshots
 from app.core.calendar_rules import WorkingCalendar
 from app.core.periods import build_periods
 from app.data import repository
@@ -217,6 +218,86 @@ def _calendar(settings: Settings) -> None:
             )
 
 
+def _snapshots(settings: Settings, result) -> None:
+    """The archive of what was reported, and anything that has since moved."""
+    components.section("Snapshots", "what was reported, and what changed since")
+
+    if not settings.snapshots.enabled:
+        st.caption(
+            "Snapshots are off. Set `snapshots.enabled: true` in config.yaml and "
+            "schedule `tools/snapshot_kpis.py` to keep a record of what was "
+            "reported each day."
+        )
+        return
+
+    taken = snapshots.snapshot_dates(settings.snapshots)
+    if not taken:
+        st.info(
+            "No snapshots on file yet. Every figure here is recomputed from the "
+            "current workbooks, so a corrected row silently changes what last "
+            "month *was*. Run `python tools/snapshot_kpis.py` nightly to keep a "
+            "record of what was actually reported."
+        )
+        return
+
+    components.meta_strip(
+        [
+            f"{len(taken)} snapshot(s)",
+            f"Earliest {taken[0]}",
+            f"Latest {taken[-1]}",
+            f"Stored in {settings.snapshots.resolved_directory()}",
+        ]
+    )
+
+    restatements = snapshots.find_restatements(
+        result.frame, settings.snapshots, settings.app.today()
+    )
+    if not restatements:
+        st.success(
+            "No restatements: every day recorded in the last snapshot still "
+            "matches the current workbooks."
+        )
+    else:
+        st.warning(
+            f"{len(restatements)} day(s) have changed since the snapshot of "
+            f"{restatements[0].as_of}. A closed day's figure moving is usually a "
+            "corrected row or a re-export — worth knowing before anyone asks why "
+            "last month is different."
+        )
+        widgets.dataframe(
+            pd.DataFrame(
+                [
+                    {
+                        "Date": r.day.strftime("%Y-%m-%d"),
+                        "Metric": r.metric,
+                        "Was": round(r.was, 2),
+                        "Now": round(r.now, 2),
+                        "Change": round(r.delta, 2),
+                        "Change %": (
+                            "—" if r.delta_pct is None else f"{r.delta_pct:+.1f}%"
+                        ),
+                    }
+                    for r in restatements[:100]
+                ]
+            ),
+            hide_index=True,
+        )
+
+    with st.expander("What was reported on a given day", expanded=False):
+        chosen = st.selectbox(
+            "Snapshot date", list(reversed(taken)), format_func=lambda d: d.isoformat()
+        )
+        rows = snapshots.as_reported(settings.snapshots, chosen)
+        if rows.empty:
+            st.caption("No rows recorded for that date.")
+        else:
+            pivot = rows.pivot_table(
+                index="period_label", columns="metric_label", values="value",
+                sort=False, aggfunc="first",
+            ).reset_index()
+            widgets.dataframe(pivot, hide_index=True)
+
+
 def render(settings: Settings) -> None:
     components.masthead("Diagnostics", settings.app.organization)
     components.subhead("Where the numbers come from, and what was dropped on the way.")
@@ -240,6 +321,7 @@ def render(settings: Settings) -> None:
     _categories(settings, result)
     _web_sales(settings, result)
     _calendar(settings)
+    _snapshots(settings, result)
 
     if not result.frame.empty:
         components.section("Sample rows", "first 50 rows as the app sees them")

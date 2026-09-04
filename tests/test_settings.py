@@ -173,3 +173,88 @@ def test_an_unknown_basis_falls_back_with_a_warning(tmp_path):
     settings = load_settings(write(tmp_path, "analytics:\n  basis: lunar_cycles\n"))
     assert settings.analytics.basis == "working_days"
     assert any("analytics.basis" in w for w in settings.warnings)
+
+
+# --------------------------------------------------------------------------- #
+# Targets and snapshots
+# --------------------------------------------------------------------------- #
+
+
+def test_targets_parse_with_overrides(tmp_path):
+    settings = load_settings(
+        write(
+            tmp_path,
+            "targets:\n"
+            "  premium:\n"
+            "    month: 700000\n"
+            "    year: 8500000\n"
+            "  sales:\n"
+            "    month: 200\n"
+            "  overrides:\n"
+            "    premium:\n"
+            "      '2026-12': 950000\n",
+        )
+    )
+    assert not [w for w in settings.warnings if "target" in w]
+    assert settings.targets.values["premium"] == {"month": 700000.0, "year": 8500000.0}
+    assert settings.targets.overrides["premium"]["2026-12"] == 950000.0
+    assert settings.targets.has_any() is True
+
+
+def test_bad_targets_are_dropped_with_warnings(tmp_path):
+    settings = load_settings(
+        write(
+            tmp_path,
+            "targets:\n"
+            "  profit:\n"
+            "    month: 100\n"
+            "  premium:\n"
+            "    quarter: 100\n"
+            "    month: -5\n"
+            "  overrides:\n"
+            "    premium:\n"
+            "      'December': 100\n",
+        )
+    )
+    assert settings.targets.values == {}
+    assert settings.targets.overrides == {}
+    assert any("not one of" in w for w in settings.warnings)
+    assert any("period must be" in w for w in settings.warnings)
+    assert any("not a positive number" in w for w in settings.warnings)
+    assert any("expected YYYY-MM" in w for w in settings.warnings)
+
+
+def test_no_targets_configured_is_not_an_error(tmp_path):
+    settings = load_settings(write(tmp_path, "app:\n  title: Test\n"))
+    assert settings.targets.has_any() is False
+
+
+def test_snapshot_defaults_and_overrides(tmp_path):
+    default = load_settings(write(tmp_path, "app:\n  title: Test\n"))
+    assert default.snapshots.enabled is True
+    assert default.snapshots.daily_days == 45
+
+    custom = load_settings(
+        write(
+            tmp_path,
+            "snapshots:\n  enabled: false\n  daily_days: 90\n  directory: /tmp/snaps\n",
+        )
+    )
+    assert custom.snapshots.enabled is False
+    assert custom.snapshots.daily_days == 90
+    assert str(custom.snapshots.resolved_directory()) == "/tmp/snaps"
+
+
+def test_data_health_rejects_a_baseline_shorter_than_its_window(tmp_path):
+    settings = load_settings(
+        write(
+            tmp_path,
+            "analytics:\n"
+            "  data_health:\n"
+            "    volume_window: 90\n"
+            "    volume_baseline: 15\n",
+        )
+    )
+    assert any("volume_baseline" in w for w in settings.warnings)
+    assert settings.analytics.data_health.volume_window == 15
+    assert settings.analytics.data_health.volume_baseline == 90

@@ -9,6 +9,7 @@ other module has to know the YAML shape.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from pathlib import Path
@@ -188,6 +189,42 @@ class AnalyticsSettings:
 
 
 @dataclass(frozen=True)
+class SnapshotSettings:
+    """A point-in-time record of what was reported.
+
+    Every figure on the dashboard is recomputed from the current workbooks, so a
+    restated or corrected row silently changes what last month "was". A snapshot
+    freezes what was reported on a given day, which is what makes the question
+    "what did we report on September 1?" answerable at all -- and makes a
+    restatement visible instead of invisible.
+    """
+
+    enabled: bool = True
+    directory: str = "runtime/snapshots"
+    # Trailing days captured each run, for detecting changes to closed days.
+    daily_days: int = 45
+    # Below this, a difference is float noise rather than a restatement.
+    restatement_tolerance: float = 0.01
+
+    def resolved_directory(self) -> Path:
+        return paths.resolve(self.directory)
+
+
+@dataclass(frozen=True)
+class TargetSettings:
+    """Goals per metric, per period. Absent means "no target", not zero."""
+
+    enabled: bool = True
+    # {metric: {"month": value, "year": value}}
+    values: dict[str, dict[str, float]] = field(default_factory=dict)
+    # {metric: {"2026-12": value}} for a month that is not like the others.
+    overrides: dict[str, dict[str, float]] = field(default_factory=dict)
+
+    def has_any(self) -> bool:
+        return self.enabled and bool(self.values or self.overrides)
+
+
+@dataclass(frozen=True)
 class AdminSettings:
     enabled: bool = True
     scripts_dir: str = "scripts"
@@ -216,6 +253,8 @@ class Settings:
     calendar: CalendarSettings
     projection: ProjectionSettings
     analytics: AnalyticsSettings
+    snapshots: SnapshotSettings
+    targets: TargetSettings
     admin: AdminSettings
     source_file: Path
     warnings: tuple[str, ...] = ()
@@ -411,6 +450,79 @@ def _parse_analytics(raw: dict[str, Any], warnings: list[str]) -> AnalyticsSetti
     )
 
 
+TARGET_PERIODS = ("month", "year")
+_MONTH_KEY = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+
+
+def _parse_snapshots(raw: dict[str, Any]) -> SnapshotSettings:
+    defaults = SnapshotSettings()
+    return SnapshotSettings(
+        enabled=bool(raw.get("enabled", defaults.enabled)),
+        directory=str(raw.get("directory") or defaults.directory),
+        daily_days=_as_int(raw.get("daily_days"), defaults.daily_days),
+        restatement_tolerance=(
+            _as_float(raw.get("restatement_tolerance"))
+            or defaults.restatement_tolerance
+        ),
+    )
+
+
+def _parse_targets(raw: dict[str, Any], warnings: list[str]) -> TargetSettings:
+    values: dict[str, dict[str, float]] = {}
+    overrides: dict[str, dict[str, float]] = {}
+
+    for metric, spec in raw.items():
+        if metric in ("enabled", "overrides"):
+            continue
+        if metric not in VALID_METRICS:
+            warnings.append(
+                f"targets.{metric}: not one of {', '.join(VALID_METRICS)}; ignored."
+            )
+            continue
+        if not isinstance(spec, dict):
+            warnings.append(f"targets.{metric} must be a mapping of period to value.")
+            continue
+        for period, value in spec.items():
+            number = _as_float(value)
+            if period not in TARGET_PERIODS:
+                warnings.append(
+                    f"targets.{metric}.{period}: period must be "
+                    f"{' or '.join(TARGET_PERIODS)}; ignored."
+                )
+            elif number is None or number <= 0:
+                warnings.append(
+                    f"targets.{metric}.{period}: {value!r} is not a positive "
+                    "number; ignored."
+                )
+            else:
+                values.setdefault(metric, {})[period] = number
+
+    for metric, spec in (raw.get("overrides") or {}).items():
+        if metric not in VALID_METRICS:
+            warnings.append(f"targets.overrides.{metric}: unknown metric; ignored.")
+            continue
+        if not isinstance(spec, dict):
+            continue
+        for key, value in spec.items():
+            month = str(key)
+            number = _as_float(value)
+            if not _MONTH_KEY.match(month):
+                warnings.append(
+                    f"targets.overrides.{metric}.{month}: expected YYYY-MM; ignored."
+                )
+            elif number is None or number <= 0:
+                warnings.append(
+                    f"targets.overrides.{metric}.{month}: not a positive number; "
+                    "ignored."
+                )
+            else:
+                overrides.setdefault(metric, {})[month] = number
+
+    return TargetSettings(
+        enabled=bool(raw.get("enabled", True)), values=values, overrides=overrides
+    )
+
+
 def _parse(raw: dict[str, Any], source_file: Path) -> Settings:
     warnings: list[str] = []
 
@@ -505,6 +617,9 @@ def _parse(raw: dict[str, Any], source_file: Path) -> Settings:
 
     analytics = _parse_analytics(raw.get("analytics") or {}, warnings)
 
+    snapshots = _parse_snapshots(raw.get("snapshots") or {})
+    targets = _parse_targets(raw.get("targets") or {}, warnings)
+
     admin_raw = raw.get("admin") or {}
     environment = {
         str(k): str(v) for k, v in (admin_raw.get("environment") or {}).items()
@@ -530,6 +645,8 @@ def _parse(raw: dict[str, Any], source_file: Path) -> Settings:
         calendar=calendar,
         projection=projection,
         analytics=analytics,
+        snapshots=snapshots,
+        targets=targets,
         admin=admin,
         source_file=source_file,
         warnings=tuple(warnings),
@@ -561,6 +678,8 @@ def load_settings(path: Path | None = None) -> Settings:
             calendar=settings.calendar,
             projection=settings.projection,
             analytics=settings.analytics,
+            snapshots=settings.snapshots,
+            targets=settings.targets,
             admin=settings.admin,
             source_file=target,
             warnings=(f"Could not parse {target.name}: {exc}",) + settings.warnings,

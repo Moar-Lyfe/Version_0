@@ -171,6 +171,16 @@ result.
 0 7 * * 1-6  cd /opt/executive-dashboard && .venv/bin/python tools/check_alerts.py --quiet >> runtime/logs/alerts.log 2>&1
 ```
 
+Pair it with the nightly snapshot, which records what was reported and exits 1
+when a closed day's figure has moved:
+
+```cron
+0 6 * * 1-6  cd /opt/executive-dashboard && .venv/bin/python tools/snapshot_kpis.py >> runtime/logs/snapshots.log 2>&1
+```
+
+Order matters: snapshot **after** the workbooks refresh and **before** the alert
+check, so the archive reflects the day being reported on.
+
 **Windows** — a second scheduled task:
 
 ```bat

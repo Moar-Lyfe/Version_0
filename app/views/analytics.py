@@ -14,13 +14,14 @@ from __future__ import annotations
 import pandas as pd
 import streamlit as st
 
-from app.core import analytics, data_health, kpis
+from app.core import analytics, data_health, kpis, targets
 from app.core.analytics import OVERALL, Alert, Severity
 from app.core.calendar_rules import WorkingCalendar
+from app.core.periods import MONTH, YEAR, build_periods
 from app.data import repository
 from app.settings import Settings
 from app.ui import charts, components
-from app.ui.theme import STATUS, format_currency
+from app.ui.theme import STATUS, format_currency, md_escape
 from app.views import widgets
 
 # How much history the explorer chart shows by default.
@@ -215,6 +216,24 @@ def _explorer(
             reference_label = f"{rule.name} ({'floor' if rule.operator == 'min' else 'ceiling'})"
             break
 
+    # Failing that, a period target implies a daily rate, which is the more
+    # meaningful line to hold a moving average against.
+    if reference is None and settings.targets.has_any():
+        calendar = WorkingCalendar.from_settings(settings.calendar)
+        periods = build_periods(settings.app.today())
+        working = {
+            key: calendar.working_days_between(
+                periods[key].full_start, periods[key].full_end
+            )
+            for key in (MONTH, YEAR)
+            if periods[key].full_start and periods[key].full_end
+        }
+        pace = targets.daily_pace_target(
+            settings.targets, definition.key, periods, working
+        )
+        if pace is not None:
+            reference, reference_label = pace[0], pace[1]
+
     charts.render(
         charts.moving_average_chart(
             averages.tail(CHART_DAYS),
@@ -231,8 +250,10 @@ def _explorer(
     relevant = [a for a in alerts if a.metric == definition.key]
     if relevant:
         st.caption(
-            "Rules watching this metric: "
-            + " · ".join(f"{a.rule} — {a.severity.label}" for a in relevant)
+            md_escape(
+                "Rules watching this metric: "
+                + " · ".join(f"{a.rule} — {a.severity.label}" for a in relevant)
+            )
         )
 
     with st.expander("Show the averages as a table", expanded=False):
